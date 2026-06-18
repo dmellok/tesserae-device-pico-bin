@@ -1,14 +1,13 @@
 /*
  * epd_13in3e.h: driver for the Inky Impression 13.3" (EL133UF1 / Spectra 6).
  *
- * The command opcodes, argument blobs, and init/refresh sequencing originate
- * from Waveshare's official EL133UF1 / Spectra 6 demo (waveshareteam/
- * ESP32-S3-ePaper-13.3E6), which derives them from the EL133UF1 datasheet.
- *
- * This file is a transport port: it follows tesserae-device-esp32-bin
- * (src/epd_driver.c), which adapted the Waveshare demo to ESP-IDF. Here the
- * ESP-IDF SPI/GPIO calls become bit-banged GPIO on the RP2350; the opcodes,
- * argument blobs, and sequencing are unchanged from the Waveshare original.
+ * The init/power sequence, command values, BUSY polarity, and refresh steps
+ * follow Pimoroni's Inky driver (pimoroni/inky, inky/inky_el133uf1.py), which
+ * is the source of truth for this board. The Inky Impression is not a drop-in
+ * for the bare Waveshare panel: it needs its own power configuration and uses
+ * inverted BUSY, so the earlier Waveshare/ESP-IDF port (tesserae-device-esp32
+ * -bin) left the panel blank. Here the Python reference's spidev/gpiod calls
+ * become bit-banged GPIO on the RP2350.
  *
  * The panel has two controllers behind one SPI bus, selected by CS_M (left
  * half, columns 0..599) and CS_S (right half, columns 600..1199). A frame is
