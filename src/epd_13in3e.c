@@ -118,24 +118,33 @@ static void cmd_with_data(uint8_t cmd, const uint8_t *buf, size_t len)
 }
 
 /*
- * Block until BUSY goes high (idle). The panel holds BUSY low while busy. A
- * full Spectra 6 refresh is ~25-35 s, so we warn at 60 s and give up at 90 s
- * rather than spin forever on a mis-wired BUSY line.
+ * Block until the panel reports idle.
+ *
+ * BUSY polarity here follows the Inky Impression, not the Waveshare panel: on
+ * the Inky board BUSY reads HIGH while the panel is working and LOW once it is
+ * ready (pimoroni/inky inky_el133uf1.py), the opposite of the Waveshare ESP32
+ * demo this driver otherwise tracks. The Inky PCB inverts the line. The input
+ * also carries a pull-up (see epd_gpio_init), so a disconnected BUSY reads HIGH
+ * (treated as "busy") and trips the timeout rather than floating.
+ *
+ * A short settle lets the panel assert BUSY after the triggering command, so
+ * we do not race past a refresh that has not started pulling BUSY high yet.
+ * timeout_ms caps the wait so a stuck or disconnected line cannot hang the
+ * firmware; pass a value above the operation's real duration (a full refresh
+ * is ~25-35 s).
  */
-static void wait_idle(void)
+static void wait_idle(uint32_t timeout_ms)
 {
-    const int poll_ms = 10;
-    int elapsed_ms = 0;
-    bool warned = false;
-    while (gpio_get(EPD_PIN_BUSY) == 0) {
+    sleep_ms(50);                          /* let BUSY assert after the command */
+
+    const uint32_t poll_ms = 10;
+    uint32_t elapsed_ms = 0;
+    while (gpio_get(EPD_PIN_BUSY) == 1) {   /* 1 = busy */
         sleep_ms(poll_ms);
         elapsed_ms += poll_ms;
-        if (!warned && elapsed_ms >= 60000) {
-            printf("epd: BUSY still low after 60s, panel may be stuck\n");
-            warned = true;
-        }
-        if (elapsed_ms >= 90000) {
-            printf("epd: giving up on BUSY after 90s\n");
+        if (elapsed_ms >= timeout_ms) {
+            printf("epd: BUSY still high after %ums, continuing (check wiring/power)\n",
+                   (unsigned)(elapsed_ms + 50));
             return;
         }
     }
@@ -166,6 +175,7 @@ void epd_gpio_init(void)
     }
     gpio_init(EPD_PIN_BUSY);
     gpio_set_dir(EPD_PIN_BUSY, GPIO_IN);
+    gpio_pull_up(EPD_PIN_BUSY);   /* matches the Inky host config; idle line reads high */
 
     /* Idle levels: clock low, both controllers deselected, reset released. */
     gpio_put(EPD_PIN_SCLK, 0);
@@ -184,7 +194,7 @@ void epd_gpio_init(void)
 void epd_panel_init(void)
 {
     hw_reset();
-    wait_idle();
+    wait_idle(5000);   /* panel settles quickly after reset */
 
     /* Master-only: analogue timing. */
     gpio_put(EPD_PIN_CS_M, 0);
@@ -253,13 +263,14 @@ void epd_write_frame(epd_fill_row_fn fill)
 void epd_panel_refresh(void)
 {
     cs_both(0); send_cmd(PON); cs_both(1);
-    wait_idle();
+    wait_idle(5000);                       /* power-on settles quickly */
 
     sleep_ms(50);
     cs_both(0); cmd_with_data(DRF, DRF_V, sizeof(DRF_V)); cs_both(1);
-    wait_idle();
+    wait_idle(45000);                      /* the actual paint: ~25-35 s */
 
     sleep_ms(50);
     cs_both(0); cmd_with_data(POF, POF_V, sizeof(POF_V)); cs_both(1);
+    wait_idle(5000);                       /* power-off settles quickly */
     printf("epd: refresh done\n");
 }

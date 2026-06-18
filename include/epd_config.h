@@ -38,7 +38,7 @@
 #define EPD_PIN_CS_S   42   /* CS_S    <- Pi BCM16, right half  cols 600..1199*/
 #define EPD_PIN_DC      6   /* D/C     <- Pi BCM22 (low = command, high = data)*/
 #define EPD_PIN_RST     8   /* reset   <- Pi BCM27 (active low pulse)         */
-#define EPD_PIN_BUSY   41   /* busy    <- Pi BCM17 (input; low = busy)        */
+#define EPD_PIN_BUSY   41   /* busy    <- Pi BCM17 (input, pull-up; high = busy)*/
 
 /*
  * GP35/GP36 are the only Pico pins the adapter wires to the panel's clock and
