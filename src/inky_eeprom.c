@@ -13,12 +13,16 @@
  * (released, pulled high). ~100 kHz, which is comfortable for a 24Cxx EEPROM.
  */
 #include "inky_eeprom.h"
-#include "epd_config.h"
 
 #include <string.h>
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+
+/* Inky model EEPROM I2C pins, on the Pi's SDA1/SCL1 (BCM2/BCM3) which the 1:1
+ * adapter maps to Pico GP2/GP3. Bit-banged, so any two GPIOs work. */
+#define EPD_PIN_SDA  2
+#define EPD_PIN_SCL  3
 
 #define EEP_ADDR     0x50
 /* Half bit period. Deliberately slow (~10 kHz) so even the weak internal

@@ -1,33 +1,43 @@
 # tesserae-device-pico-bin
 
-Firmware for driving a **Pimoroni Inky Impression 13.3"** (EL133UF1 / Spectra 6,
-1200x1600, 6 colours) from a **Pimoroni Pico Plus 2 W** (RP2350B), written in C
-against the Raspberry Pi Pico SDK.
-
-This is the MVP. It does exactly one thing: paint a hardcoded test pattern of
-six vertical colour stripes, to prove the panel paints what the firmware tells
-it to. There is no networking, no MQTT, no remote frame fetch, no sleep, and no
-Tesserae server integration yet. Those are later layers on top of this working
-panel driver.
+Firmware for driving a **Pimoroni Inky Impression** e-paper panel from a
+**Pimoroni Pico Plus 2 W** (RP2350B), written in C against the Raspberry Pi Pico
+SDK. It reads the Inky's model EEPROM at boot, picks the matching panel driver,
+and paints a hardcoded test pattern of vertical colour stripes, to prove the
+panel paints what the firmware tells it to. No networking, no sleep, no Tesserae
+integration yet; those are later layers.
 
 It is part of the Tesserae self-hosted e-ink dashboard ecosystem, alongside
-`tesserae-device-esp32-bin` (the same panel on an ESP32-S3) and the other
-`tesserae-device-*` firmwares.
+`tesserae-device-esp32-bin` and the other `tesserae-device-*` firmwares.
 
-The panel init/power command sequence and argument values are ported from
-Pimoroni's Inky driver
-([pimoroni/inky, `inky/inky_el133uf1.py`](https://github.com/pimoroni/inky/blob/main/inky/inky_el133uf1.py)),
-which is the source of truth for this board. An earlier attempt ported the
-Waveshare ESP32 demo for the bare EL133UF1 panel and the panel stayed blank: the
-Inky board needs its own power configuration (extra DCDC / POFS / CMDA4 commands
-and different boost/PSR/CDI values), so it is not a drop-in for the Waveshare
-panel.
+### Supported panels
+
+Selected automatically from the EEPROM `display_variant`. Command sequences are
+ported from the corresponding Pimoroni Inky driver
+([pimoroni/inky](https://github.com/pimoroni/inky)).
+
+| Panel | Family | Variants | Resolution | Status |
+| --- | --- | --- | --- | --- |
+| 13.3" EL133UF1 | Spectra 6 | 21, 27 | 1200x1600 | **verified on hardware** |
+| 7.3" E673 | Spectra 6 | 22, 26 | 800x480 | untested port |
+| 4.0" E640 | Spectra 6 | 25 | 600x400 | untested port |
+| 7.3" AC073TC1A | 7-colour | 20 | 800x480 | untested port |
+| 5.7" / 4" UC8159 | 7-colour | 14, 15, 16 | 600x448 / 640x400 | untested port |
+
+Only the 13.3" is confirmed working. The others are blind ports from the
+Pimoroni reference drivers; the firmware prints `[UNTESTED driver]` for them.
+Verify each on the real panel before trusting it.
+
+Note: an earlier attempt ported the Waveshare ESP32 demo for the bare EL133UF1
+and the panel stayed blank; the Inky needs its own power configuration, so it is
+not a drop-in for the Waveshare panel. All drivers here follow the Inky sources.
 
 ## What you should see
 
-After flashing, the panel takes roughly 20 to 35 seconds (Spectra 6 panels
-refresh slowly, and the time varies run to run) and then shows six vertical
-stripes, left to right:
+After flashing, the panel refreshes (roughly 20 to 45 seconds; e-paper is slow
+and the time varies) and shows vertical colour stripes. On a 6-colour Spectra 6
+panel that is six stripes; on a 7-colour panel, seven. For the 13.3", left to
+right:
 
 ```
 | black | white | red | green | blue | yellow |
@@ -60,17 +70,20 @@ continuity meter; the vendor's published `pico_to_pi_mappings.h` and PDF do not
 match this unit and should be ignored). The Inky's per-signal BCM lines come
 from `inky_el133uf1.py`. Composing them gives:
 
-| Panel signal | Pi BCM | Pico GP | Notes |
+Shared transport (same on every panel, defined in `include/epd_io.h`):
+
+| Signal | Pi BCM | Pico GP | Notes |
 | --- | --- | --- | --- |
 | SCLK (clock) | BCM11 | **GP10** | adapter swaps clock/data; GP10 = SPI1 SCK |
 | MOSI (data) | BCM10 | **GP11** | GP11 = SPI1 TX |
-| CS_M (left half, cols 0..599) | BCM26 | GP26 | |
-| CS_S (right half, cols 600..1199) | BCM16 | GP16 | |
 | DC (data/command) | BCM22 | GP22 | low = command, high = data |
 | RST (reset) | BCM27 | GP27 | active low |
 | BUSY (input) | BCM17 | GP17 | **low = busy**, high = ready |
-| EEPROM SDA | BCM2 | GP2 | model-ID I2C (optional) |
-| EEPROM SCL | BCM3 | GP3 | |
+| EEPROM SDA / SCL | BCM2 / BCM3 | GP2 / GP3 | model-ID I2C (in `src/inky_eeprom.c`) |
+
+Chip-select differs per panel (defined in `src/panels.c`): the 13.3" is
+dual-CS, **CS_M = GP26** (left half, cols 0..599) and **CS_S = GP16** (right
+half); every other panel is single-CS on **GP8** (Pi BCM8).
 
 None of these collide with the RM2 wireless module (GP23/24/25/29), so WiFi
 remains available for later. The Inky has no software power-enable line, so
@@ -171,14 +184,14 @@ done. the panel should now show: black white red | green blue yellow
 
 | File | Purpose |
 | --- | --- |
-| [`include/epd_config.h`](include/epd_config.h) | Pin map, SPI config, panel geometry, 6-colour palette. The one place to edit pins. |
-| [`include/epd_13in3e.h`](include/epd_13in3e.h) | Panel driver API. |
-| [`src/epd_13in3e.c`](src/epd_13in3e.c) | Driver: hardware SPI, reset, init sequence, dual-CS frame write, refresh, BUSY wait. Sequence ported from `inky_el133uf1.py`. |
-| [`include/inky_eeprom.h`](include/inky_eeprom.h) / [`src/inky_eeprom.c`](src/inky_eeprom.c) | Bit-banged I2C reader for the Inky model EEPROM (panel detection / comms check). |
-| [`src/main.c`](src/main.c) | Reads the EEPROM, generates the six vertical stripes, paints one frame. |
+| [`include/epd_io.h`](include/epd_io.h) / [`src/epd_io.c`](src/epd_io.c) | Shared transport: hardware SPI1, D/C, reset, BUSY wait, command + frame-stream helpers. Fixed pins (SCLK/MOSI/DC/RST/BUSY); CS passed in per panel. |
+| [`include/panels.h`](include/panels.h) / [`src/panels.c`](src/panels.c) | One descriptor + `run()` per panel (init sequence, geometry, CS scheme, stripe pattern), plus the variant-to-panel registry. Sequences ported from the Pimoroni Inky drivers. |
+| [`include/inky_eeprom.h`](include/inky_eeprom.h) / [`src/inky_eeprom.c`](src/inky_eeprom.c) | Bit-banged I2C reader for the Inky model EEPROM (panel detection). |
+| [`src/main.c`](src/main.c) | Reads the EEPROM, looks up the panel by variant, runs its driver. |
 
-The init sequence argument blobs in `src/epd_13in3e.c` come from
-`inky_el133uf1.py`. Do not edit the canned parameter values.
+The init-sequence argument blobs in `src/panels.c` come from the Pimoroni Inky
+drivers. Do not edit the canned parameter values. To add a panel, add a `run()`
+and a `panel_t` descriptor with its variant ids.
 
 ## Not in this MVP
 
