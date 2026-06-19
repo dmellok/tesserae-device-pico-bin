@@ -18,6 +18,7 @@
 #include "net_wifi.h"
 #include "net_mqtt.h"
 #include "config.h"
+#include "psram.h"
 
 #if defined(__has_include)
 #  if __has_include("secrets.h")
@@ -30,6 +31,17 @@ int main(void)
     stdio_init_all();
     sleep_ms(2000);   /* let a freshly attached USB serial monitor catch the logs */
     printf("\ntesserae-device-pico-bin\n");
+
+    /* Phase 4a (WIP): bring up PSRAM (needed only for frames too big for SRAM,
+     * e.g. the 13.3"). Returns 0 on boards without it. The self-test is a
+     * temporary de-risk check and will be trimmed once the fetch path uses it. */
+    size_t psram_sz = psram_init(PSRAM_CS_PIN_PLUS2);
+    if (psram_sz) {
+        printf("psram: %u bytes detected; self-test %s\n",
+               (unsigned)psram_sz, psram_test(psram_sz) ? "PASS" : "FAIL");
+    } else {
+        printf("psram: none detected (large panels need a PSRAM board)\n");
+    }
 
     /* Phase 2 (WIP, building toward ESP32-client parity): load persistent
      * config from flash. On first boot (blank flash) seed it from secrets.h if
