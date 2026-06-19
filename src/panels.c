@@ -28,7 +28,7 @@ static const uint8_t cs_both[] = {26, 16};
 
 #define SETUP_SPECTRA6  300
 #define SETUP_7COLOUR   0
-#define MAX_ROW_BYTES   512
+#define MAX_ROW_BYTES   800   /* >= 600 for the 13.3" full-width per-controller row */
 
 static const uint8_t PAL_SPECTRA6[6] = {0x0, 0x1, 0x3, 0x6, 0x5, 0x2};        /* blk wht red grn blu yel */
 static const uint8_t PAL_7COLOUR[7]  = {0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6};   /* blk wht grn blu red yel org */
@@ -72,6 +72,8 @@ static void paint_el133uf1(uint8_t variant, const uint8_t *frame)
     epd_cs_init(cs_s);
     epd_reset(1, 30, 30, 300);
 
+    /* Init register values are the Pimoroni inky_el133uf1.py sequence
+     * (the verified reference for this panel). */
     const uint32_t S = SETUP_SPECTRA6;
     static const uint8_t ANTM[]  = {0x00, 0x0C, 0x0C, 0xD9, 0xDD, 0xDD, 0x15, 0x15, 0x55};
     static const uint8_t CMD66[] = {0x49, 0x55, 0x13, 0x5D, 0x05, 0x10};
@@ -85,7 +87,7 @@ static void paint_el133uf1(uint8_t variant, const uint8_t *frame)
     static const uint8_t AGID[]  = {0x10};
     static const uint8_t PWS[]   = {0x22};
     static const uint8_t CCSET[] = {0x01};
-    static const uint8_t TRES[]  = {0x04, 0xB0, 0x03, 0x20};
+    static const uint8_t TRES[]  = {0x04, 0xB0, 0x03, 0x20};   /* 1200 x 800 per controller */
     static const uint8_t CMDA4[] = {0x03, 0x00, 0x01, 0x03, 0x00, 0x03, 0x00, 0x00, 0x00};
     static const uint8_t PWR[]   = {0x0F, 0x00, 0x28, 0x2C, 0x28, 0x38};
     static const uint8_t ENBUF[] = {0x07};
@@ -118,21 +120,56 @@ static void paint_el133uf1(uint8_t variant, const uint8_t *frame)
     epd_command(&cs_m,  1, S, 0xB1, VCOMP, sizeof VCOMP);
     printf("epd: init complete\n");
 
-    /* Per row: bytes [0..299] = left half (CS_M), [300..599] = right half (CS_S).
-     * Frame stride is 600 bytes; stripe fallback generates per-half rows. */
+    /* Replicate the Pimoroni inky_el133uf1 show() transform exactly, because
+     * the pi_bin renderer (kind=pi_bin_client) sends the frame in the panel's
+     * NATIVE LANDSCAPE orientation (1600x1200, 800 bytes/row, 1200 rows): rotate
+     * 90 deg CW into the 1200x1600 portrait the controllers scan, then split at
+     * column 600 (left half -> CS_M, right half -> CS_S), 300 bytes x 1600 rows
+     * each. Skipping this rotate (the esp32 path, for a portrait-native panel)
+     * is what painted real frames sideways and tiled on this landscape panel.
+     *
+     * Rotation maps portrait pixel (i,j) -> landscape (row=1199-j, col=i):
+     *   CS_M byte k of portrait row i: hi=L(1199-2k, i), lo=L(1198-2k, i)
+     *   CS_S byte k:                   hi=L( 599-2k, i), lo=L( 598-2k, i)
+     * L(r,c) = frame[r*800 + (c>>1)], high nibble for even c. */
     uint8_t row[MAX_ROW_BYTES];
-    if (!frame) fill_stripe_row(row, 300, 1200, 0, PAL_SPECTRA6, 6);
+
     epd_dtm_begin(cs_m, S, 0x10);
-    for (int y = 0; y < 1600; y++)
-        epd_dtm_write(frame ? frame + (size_t)y * 600 : row, 300);
+    if (frame) {
+        for (int i = 0; i < 1600; i++) {
+            const uint8_t shift = (i & 1) ? 0 : 4;       /* nibble for column i */
+            const size_t  col   = (size_t)(i >> 1);
+            for (int k = 0; k < 300; k++) {
+                uint8_t hb = frame[(size_t)(1199 - 2 * k) * 800 + col];
+                uint8_t lb = frame[(size_t)(1198 - 2 * k) * 800 + col];
+                row[k] = (uint8_t)((((hb >> shift) & 0x0F) << 4) | ((lb >> shift) & 0x0F));
+            }
+            epd_dtm_write(row, 300);
+        }
+    } else {
+        fill_stripe_row(row, 300, 1200, 0, PAL_SPECTRA6, 6);
+        for (int i = 0; i < 1600; i++) epd_dtm_write(row, 300);
+    }
     epd_dtm_end();
 
-    if (!frame) fill_stripe_row(row, 300, 1200, 600, PAL_SPECTRA6, 6);
     epd_dtm_begin(cs_s, S, 0x10);
-    for (int y = 0; y < 1600; y++)
-        epd_dtm_write(frame ? frame + (size_t)y * 600 + 300 : row, 300);
+    if (frame) {
+        for (int i = 0; i < 1600; i++) {
+            const uint8_t shift = (i & 1) ? 0 : 4;
+            const size_t  col   = (size_t)(i >> 1);
+            for (int k = 0; k < 300; k++) {
+                uint8_t hb = frame[(size_t)(599 - 2 * k) * 800 + col];
+                uint8_t lb = frame[(size_t)(598 - 2 * k) * 800 + col];
+                row[k] = (uint8_t)((((hb >> shift) & 0x0F) << 4) | ((lb >> shift) & 0x0F));
+            }
+            epd_dtm_write(row, 300);
+        }
+    } else {
+        fill_stripe_row(row, 300, 1200, 600, PAL_SPECTRA6, 6);
+        for (int i = 0; i < 1600; i++) epd_dtm_write(row, 300);
+    }
     epd_dtm_end();
-    printf("epd: frame streamed, refreshing...\n");
+    printf("epd: frame streamed (rotated landscape->portrait), refreshing...\n");
 
     static const uint8_t z = 0x00;
     epd_command(cs_both, 2, S, 0x04, NULL, 0);   sleep_ms(300);
