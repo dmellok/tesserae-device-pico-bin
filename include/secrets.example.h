@@ -17,20 +17,25 @@
 /* #define MQTT_USER       "" */
 /* #define MQTT_PASS       "" */
 
-/* Development overrides (off by default). Handy while iterating on hardware:
- *   DEV_SLEEP_S      pin the sleep interval, overriding the broker/flash value.
- *                    Set 0 to stay awake and loop the cycle (no deep sleep), so
- *                    USB serial stays up and the board is easy to reflash.
- *   DEV_FORCE_REPAINT  ignore the SHA-256 dedup and re-download + repaint every
- *                    cycle (useful when the frame URL has not changed).
- *   DEV_FRAME_URL    bypass the retained MQTT topic and fetch a fixed frame URL
- *                    (string literal). Handy before the server publishes a
- *                    retained frame for this device. e.g.
- *                    -DDEV_FRAME_URL=\"http://host:8765/renders/abc.bin\"
- *   DEV_FORCE_PORTAL force the provisioning portal (setup AP) on boot even when
- *                    WiFi creds exist, for testing the captive portal.
- * Can also be passed as build flags, e.g.
- *   PLATFORMIO_BUILD_FLAGS="-DDEV_SLEEP_S=0 -DDEV_FORCE_REPAINT" pio run -t upload
- */
-/* #define DEV_SLEEP_S       0 */
-/* #define DEV_FORCE_REPAINT 1 */
+/* ------------------------------------------------------------------------
+ * Development overrides. All off by default; uncomment the ones you want.
+ * These are read in main.c, which includes this file, so setting them here is
+ * equivalent to passing them as -D build flags (no env var needed).
+ * ------------------------------------------------------------------------ */
+
+/* Pin the deep-sleep interval (seconds), overriding the broker/flash value.
+ * Set 0 to stay awake and loop the cycle (no deep sleep) so USB serial stays
+ * up and the board is easy to reflash. */
+/* #define DEV_SLEEP_S        60 */
+
+/* Ignore the SHA-256 dedup: re-download and repaint every cycle, even when the
+ * frame URL has not changed. */
+/* #define DEV_FORCE_REPAINT  1 */
+
+/* Bypass the retained MQTT frame topic and fetch this fixed URL instead (handy
+ * before the server publishes a retained frame for this device). */
+/* #define DEV_FRAME_URL      "http://192.168.1.50:8765/renders/abc.bin" */
+
+/* Force the provisioning portal (setup AP) on boot even when WiFi creds exist,
+ * for testing the captive portal / splash. */
+/* #define DEV_FORCE_PORTAL   1 */
