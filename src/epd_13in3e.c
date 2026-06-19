@@ -1,25 +1,24 @@
 /*
  * epd_13in3e.c: Inky Impression 13.3" (EL133UF1 / Spectra 6) driver.
  *
- * The init/power sequence, command values, BUSY polarity, and refresh steps
- * here follow Pimoroni's Inky driver, inky/inky_el133uf1.py, which is the
- * source of truth for this specific board. An earlier version of this file
- * ported the Waveshare ESP32 demo (tesserae-device-esp32-bin) instead and the
- * panel stayed blank: the Inky board needs a different power configuration
- * (extra DCDC / POFS / CMDA4 commands, different boost and PSR/CDI values, and
- * inverted BUSY), so it is not a drop-in for the Waveshare panel.
+ * The init/power command sequence and argument values follow Pimoroni's Inky
+ * driver, inky/inky_el133uf1.py (the source of truth for this board). An
+ * earlier version ported the Waveshare ESP32 demo and the panel stayed blank:
+ * the Inky needs a different power configuration (extra DCDC / POFS / CMDA4
+ * commands, different boost and PSR/CDI values), so it is not a drop-in.
  *
- * Transport mapping from the Python reference:
- *   spidev xfer3()            ->  bit-banged spi_tx() on GP35/GP36
- *   gpiod set_value()         ->  gpio_put()
- *   gpiod get_value()         ->  gpio_get()
- *   time.sleep(s)             ->  sleep_ms()/sleep_us()
+ * Transport: SCLK/MOSI are driven by the RP2350B hardware SPI block (SPI1, see
+ * epd_config.h); CS, D/C, and reset are plain GPIO; BUSY is a GPIO input. The
+ * panel is write-only (no MISO).
  *
- * Why bit-bang: the adapter wires the panel's clock/data to GP35/GP36, which
- * are SPI0 TX / SPI0 RX on the RP2350B. No SPI peripheral routes a clock onto
- * GP35, so the hardware SPI block cannot be used here. We shift bits out by
- * hand. The panel is write-only and BUSY is a separate GPIO, so a transmit
- * only SPI is sufficient. See epd_config.h for the full reasoning.
+ * Two things that cost real debugging time and are easy to get wrong:
+ *   1. Command setup delay. The panel will not latch a command unless D/C is
+ *      held for a good while before the clock starts. The Pimoroni driver waits
+ *      300 ms (DC_SETUP_MS below); shorter values leave the panel ignoring the
+ *      DTM (data) command, so it refreshes an empty buffer and stays blank.
+ *   2. BUSY polarity is LOW = busy on this panel (Waveshare convention), the
+ *      OPPOSITE of what the Pimoroni Python code's pull-up heuristic implies.
+ *      See wait_refresh_done().
  */
 #include "epd_13in3e.h"
 #include "epd_config.h"
@@ -28,6 +27,7 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#include "hardware/spi.h"
 
 /* --- panel command opcodes (EL133UF1) --- */
 #define PSR             0x00   /* panel setting                            */
@@ -62,12 +62,14 @@
 #define CS_BOTH  (CS0_SEL | CS1_SEL)
 
 /*
- * Settle delay after asserting CS and driving D/C, before clocking the command
- * byte. The Pimoroni driver sleeps 300 ms here; that is almost certainly far
- * more than the controller needs, and 1 ms is ample for the lines to settle on
- * bit-banged GPIO. Bump it back up if commands are ever missed.
+ * Setup delay after asserting CS and driving D/C low, before clocking the
+ * command byte. This is NOT optional padding: with a short delay the panel
+ * misses commands (notably DTM), refreshes an empty buffer, and stays blank.
+ * 300 ms matches the Pimoroni driver and is what made the panel paint here.
+ * It runs once per command (~26 commands), so it adds ~8 s to a refresh; that
+ * is the price of reliable command latching on this controller.
  */
-#define DC_SETUP_MS 1
+#define DC_SETUP_MS 300
 
 /* --- canned command parameter blobs (from inky_el133uf1.py; do NOT edit) --- */
 static const uint8_t ANTM_V[]            = {0x00, 0x0C, 0x0C, 0xD9, 0xDD, 0xDD, 0x15, 0x15, 0x55};
@@ -116,16 +118,11 @@ static inline void cs_deselect(void)
  * If colours ever come out corrupted, slow this down by adding a short
  * busy_wait between the edges.
  */
+/* Transmit on the hardware SPI block (mode 0, MSB first; configured in
+ * epd_gpio_init). The panel is write-only, so we never read back. */
 static void spi_tx(const uint8_t *data, size_t len)
 {
-    for (size_t i = 0; i < len; i++) {
-        uint8_t b = data[i];
-        for (int bit = 7; bit >= 0; bit--) {
-            gpio_put(EPD_PIN_MOSI, (b >> bit) & 1u);
-            gpio_put(EPD_PIN_SCLK, 1);   /* rising edge: slave samples MOSI */
-            gpio_put(EPD_PIN_SCLK, 0);
-        }
-    }
+    spi_write_blocking(EPD_SPI, data, len);
 }
 
 /*
@@ -147,49 +144,47 @@ static void send_command(uint8_t sel, uint8_t cmd, const uint8_t *data, size_t n
 }
 
 /*
- * Block until the panel reports idle.
+ * Wait for a refresh to finish.
  *
- * BUSY polarity follows the Inky Impression: BUSY reads HIGH while the panel is
- * working and LOW once it is ready (inky_el133uf1.py), the opposite of the
- * Waveshare panel. The input carries a pull-up (see epd_gpio_init), so a
- * disconnected BUSY reads HIGH (treated as busy) and trips the timeout rather
- * than floating. A short settle lets BUSY assert after the triggering command
- * so we do not race past a refresh that has not started yet. timeout_ms caps
- * the wait; pass a value above the operation's real duration.
+ * BUSY polarity here is the Waveshare/EL133 convention, confirmed by scope-like
+ * logging on this panel: BUSY is driven LOW while the panel is refreshing and
+ * released HIGH (via the pull-up) when done. A full refresh is ~20 s. We settle
+ * first so the refresh has actually asserted BUSY, then hold until it returns
+ * high, capped so a stuck line cannot hang the firmware.
  */
-static void wait_idle(uint32_t timeout_ms)
+static void wait_refresh_done(void)
 {
-    sleep_ms(50);                          /* let BUSY assert after the command */
-
-    const uint32_t poll_ms = 10;
-    uint32_t elapsed_ms = 0;
-    while (gpio_get(EPD_PIN_BUSY) == 1) {   /* 1 = busy */
-        sleep_ms(poll_ms);
-        elapsed_ms += poll_ms;
-        if (elapsed_ms >= timeout_ms) {
-            printf("epd: BUSY still high after %ums, continuing (check wiring/power)\n",
-                   (unsigned)(elapsed_ms + 50));
-            return;
-        }
+    sleep_ms(2000);                         /* let the refresh assert BUSY low */
+    uint32_t ms = 2000;
+    while (gpio_get(EPD_PIN_BUSY) == 0 && ms < 60000) {   /* 0 = busy */
+        sleep_ms(100);
+        ms += 100;
     }
+    printf("epd: refresh complete after %ums\n", (unsigned)ms);
 }
 
-/* Single reset pulse: drive RST low 30 ms, high 30 ms, then wait for ready.
- * Matches inky_el133uf1.py setup(). RST is active low. */
+/* Single reset pulse: RST low 30 ms, high 30 ms, then settle. RST is active
+ * low. Matches inky_el133uf1.py setup(). */
 static void hw_reset(void)
 {
     gpio_put(EPD_PIN_RST, 0); sleep_ms(30);
     gpio_put(EPD_PIN_RST, 1); sleep_ms(30);
-    wait_idle(2000);
+    sleep_ms(300);
 }
 
 /* ------------------------------ public ------------------------------- */
 
 void epd_gpio_init(void)
 {
+    /* SCLK + MOSI are driven by the hardware SPI block. */
+    spi_init(EPD_SPI, EPD_SPI_HZ);
+    spi_set_format(EPD_SPI, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);  /* mode 0 */
+    gpio_set_function(EPD_PIN_SCLK, GPIO_FUNC_SPI);
+    gpio_set_function(EPD_PIN_MOSI, GPIO_FUNC_SPI);
+
+    /* CS, D/C, and reset are plain GPIO outputs we drive by hand. */
     const uint outputs[] = {
-        EPD_PIN_SCLK, EPD_PIN_MOSI, EPD_PIN_CS_M,
-        EPD_PIN_CS_S, EPD_PIN_DC,   EPD_PIN_RST,
+        EPD_PIN_CS_M, EPD_PIN_CS_S, EPD_PIN_DC, EPD_PIN_RST,
     };
     for (size_t i = 0; i < sizeof(outputs) / sizeof(outputs[0]); i++) {
         gpio_init(outputs[i]);
@@ -199,8 +194,7 @@ void epd_gpio_init(void)
     gpio_set_dir(EPD_PIN_BUSY, GPIO_IN);
     gpio_pull_up(EPD_PIN_BUSY);   /* matches the Inky host config; idle line reads high */
 
-    /* Idle levels: clock low, both controllers deselected, reset released. */
-    gpio_put(EPD_PIN_SCLK, 0);
+    /* Idle levels: both controllers deselected, reset released. */
     gpio_put(EPD_PIN_DC,   0);
     gpio_put(EPD_PIN_RST,  1);
     cs_deselect();
@@ -274,12 +268,12 @@ void epd_write_frame(epd_fill_row_fn fill)
 void epd_panel_refresh(void)
 {
     send_command(CS_BOTH, PON, NULL, 0);
-    wait_idle(5000);                       /* power-on settles quickly */
+    sleep_ms(300);                         /* power-on settle */
 
     send_command(CS_BOTH, DRF, DRF_V, sizeof(DRF_V));
-    wait_idle(45000);                      /* the actual paint: ~25-35 s */
+    wait_refresh_done();                   /* the actual paint, ~20 s */
 
     send_command(CS_BOTH, POF, POF_V, sizeof(POF_V));
-    wait_idle(5000);                       /* power-off settles quickly */
+    sleep_ms(300);                         /* power-off settle */
     printf("epd: refresh done\n");
 }

@@ -24,6 +24,7 @@
 
 #include "epd_13in3e.h"
 #include "epd_config.h"
+#include "inky_eeprom.h"
 
 /* The six stripe colours, left to right, as 4-bit palette nibbles. */
 static const uint8_t kStripeColours[6] = {
@@ -71,6 +72,19 @@ int main(void)
     sleep_ms(2000);
     printf("\ntesserae-device-pico-bin: painting six vertical stripes\n");
 
+    /* Read the model EEPROM first: a fast confirmation that the board is wired
+     * and talking (over I2C, separate from the panel's SPI) before the slow
+     * refresh. Not required for the paint; purely a sanity check. */
+    inky_i2c_init();
+    inky_eeprom_t ee;
+    if (inky_eeprom_read(&ee)) {
+        printf("eeprom: %ux%u variant=%u (%s)\n",
+               ee.width, ee.height, ee.display_variant,
+               inky_display_variant_name(ee.display_variant));
+    } else {
+        printf("eeprom: no response at 0x50 (continuing to paint anyway)\n");
+    }
+
     epd_gpio_init();
     epd_panel_init();
 
@@ -82,7 +96,6 @@ int main(void)
 
     printf("done. the panel should now show: black white red | green blue yellow\n");
 
-    /* Nothing else to do for the MVP. Idle. */
     while (true) {
         tight_loop_contents();
     }
