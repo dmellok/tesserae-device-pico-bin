@@ -1,21 +1,19 @@
 /*
- * panels.c: one descriptor + run() per supported Inky panel, selected at
- * runtime by the model EEPROM's display_variant. Each run() does the whole job
- * for its panel: SPI/GPIO setup, reset, init, paint vertical colour stripes,
- * refresh.
+ * panels.c: one descriptor + paint() per supported Inky panel, selected at
+ * runtime by the model EEPROM's display_variant. paint(variant, frame) runs the
+ * whole sequence for its panel: SPI/GPIO setup, reset, init, stream a frame,
+ * refresh. frame == NULL streams the built-in vertical-stripe test pattern;
+ * otherwise frame is the panel-native packed-4bpp buffer.
  *
- * Command sequences and argument values are ported from the Pimoroni Inky
- * drivers (github.com/pimoroni/inky):
+ * Command sequences are ported from the Pimoroni Inky drivers
+ * (github.com/pimoroni/inky):
  *   EL133UF1 (13.3 Spectra 6)  inky_el133uf1.py   -- VERIFIED on hardware
  *   E673     (7.3 Spectra 6)   inky_e673.py       -- untested port
  *   E640     (4.0 Spectra 6)   inky_e640.py       -- untested port
  *   AC073TC1A(7.3 7-colour)    inky_ac073tc1a.py  -- untested port
  *   UC8159   (7-colour)        inky_uc8159.py     -- untested port
  *
- * Shared low-level transport (SPI, DC, RST, BUSY) lives in epd_io.c; only the
- * chip-select pin(s) differ per panel. See CLAUDE.md for the wiring story
- * (1:1 adapter with clock/data swapped; 300 ms command setup for Spectra 6;
- * BUSY active low).
+ * Shared transport lives in epd_io.c; see CLAUDE.md for the wiring story.
  */
 #include "panels.h"
 #include "epd_io.h"
@@ -23,26 +21,18 @@
 #include <stddef.h>
 #include <stdio.h>
 
-/* Chip-select pins (Pico GP, via the 1:1 adapter). Single-CS panels use BCM8;
- * the 13.3" is dual-CS on BCM26 (left half) and BCM16 (right half). */
 static const uint8_t cs8       = 8;
 static const uint8_t cs_m      = 26;
 static const uint8_t cs_s      = 16;
 static const uint8_t cs_both[] = {26, 16};
 
-/* Spectra 6 needs a long D/C-to-clock hold; the 7-colour panels do not. */
 #define SETUP_SPECTRA6  300
 #define SETUP_7COLOUR   0
+#define MAX_ROW_BYTES   512
 
-#define MAX_ROW_BYTES   512   /* widest panel is 800 px = 400 bytes/row */
-
-/* Stripe palettes (native nibble codes). */
 static const uint8_t PAL_SPECTRA6[6] = {0x0, 0x1, 0x3, 0x6, 0x5, 0x2};        /* blk wht red grn blu yel */
 static const uint8_t PAL_7COLOUR[7]  = {0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6};   /* blk wht grn blu red yel org */
 
-/* Fill one packed-4bpp row (2 px/byte, even pixel = high nibble) with vertical
- * stripes of n colours across total_w columns, for the slice starting at
- * base_col. row_bytes = (slice width) / 2. */
 static void fill_stripe_row(uint8_t *dst, int row_bytes, int total_w,
                             int base_col, const uint8_t *pal, int n)
 {
@@ -56,25 +46,28 @@ static void fill_stripe_row(uint8_t *dst, int row_bytes, int total_w,
     }
 }
 
-/* Stream a single-controller frame of uniform stripe rows to one CS. */
-static void stream_single(uint8_t cs, uint32_t setup, uint8_t dtm_cmd,
-                          int width, int height, const uint8_t *pal, int n)
+/* Stream a single-controller frame to one CS. If frame is NULL, stream uniform
+ * stripe rows; otherwise stream the frame row by row. */
+static void stream_single(uint8_t cs, uint32_t setup, int width, int height,
+                          const uint8_t *frame, const uint8_t *pal, int n)
 {
     uint8_t row[MAX_ROW_BYTES];
     int row_bytes = width / 2;
-    fill_stripe_row(row, row_bytes, width, 0, pal, n);   /* same on every row */
-    epd_dtm_begin(cs, setup, dtm_cmd);
-    for (int y = 0; y < height; y++) epd_dtm_write(row, row_bytes);
+    if (!frame) fill_stripe_row(row, row_bytes, width, 0, pal, n);
+    epd_dtm_begin(cs, setup, 0x10);
+    for (int y = 0; y < height; y++) {
+        const uint8_t *src = frame ? (frame + (size_t)y * row_bytes) : row;
+        epd_dtm_write(src, row_bytes);
+    }
     epd_dtm_end();
 }
 
 /* ===================== EL133UF1, 13.3" Spectra 6 (verified) ===================== */
-/* Dual controller, split at column 600. Ported 1:1 from the working driver. */
 
-static void run_el133uf1(uint8_t variant)
+static void paint_el133uf1(uint8_t variant, const uint8_t *frame)
 {
     (void)variant;
-    epd_io_init(4 * 1000 * 1000);   /* 4 MHz (verified) */
+    epd_io_init(4 * 1000 * 1000);
     epd_cs_init(cs_m);
     epd_cs_init(cs_s);
     epd_reset(1, 30, 30, 300);
@@ -102,14 +95,14 @@ static void run_el133uf1(uint8_t variant)
     static const uint8_t BBVDN[] = {0x01};
     static const uint8_t VCOMP[] = {0x02};
 
-    epd_command(&cs_m,  1, S, 0x74, ANTM,  sizeof ANTM);    /* master-only */
+    epd_command(&cs_m,  1, S, 0x74, ANTM,  sizeof ANTM);
     epd_command(cs_both,2, S, 0xF0, CMD66, sizeof CMD66);
     epd_command(cs_both,2, S, 0x00, PSR,   sizeof PSR);
     epd_command(&cs_m,  1, S, 0xA5, DCDC,  sizeof DCDC);
     epd_command(cs_both,2, S, 0x30, PLL,   sizeof PLL);
     epd_command(cs_both,2, S, 0x50, CDI,   sizeof CDI);
     epd_command(cs_both,2, S, 0x60, TCON,  sizeof TCON);
-    epd_command(&cs_m,  1, S, 0x03, POFS0, sizeof POFS0);   /* per-controller */
+    epd_command(&cs_m,  1, S, 0x03, POFS0, sizeof POFS0);
     epd_command(&cs_s,  1, S, 0x03, POFS1, sizeof POFS1);
     epd_command(cs_both,2, S, 0x86, AGID,  sizeof AGID);
     epd_command(cs_both,2, S, 0xE3, PWS,   sizeof PWS);
@@ -125,35 +118,36 @@ static void run_el133uf1(uint8_t variant)
     epd_command(&cs_m,  1, S, 0xB1, VCOMP, sizeof VCOMP);
     printf("epd: init complete\n");
 
-    /* Frame: left half (cols 0..599) to CS_M, right half (600..1199) to CS_S. */
+    /* Per row: bytes [0..299] = left half (CS_M), [300..599] = right half (CS_S).
+     * Frame stride is 600 bytes; stripe fallback generates per-half rows. */
     uint8_t row[MAX_ROW_BYTES];
-    fill_stripe_row(row, 300, 1200, 0, PAL_SPECTRA6, 6);
+    if (!frame) fill_stripe_row(row, 300, 1200, 0, PAL_SPECTRA6, 6);
     epd_dtm_begin(cs_m, S, 0x10);
-    for (int y = 0; y < 1600; y++) epd_dtm_write(row, 300);
+    for (int y = 0; y < 1600; y++)
+        epd_dtm_write(frame ? frame + (size_t)y * 600 : row, 300);
     epd_dtm_end();
-    fill_stripe_row(row, 300, 1200, 600, PAL_SPECTRA6, 6);
+
+    if (!frame) fill_stripe_row(row, 300, 1200, 600, PAL_SPECTRA6, 6);
     epd_dtm_begin(cs_s, S, 0x10);
-    for (int y = 0; y < 1600; y++) epd_dtm_write(row, 300);
+    for (int y = 0; y < 1600; y++)
+        epd_dtm_write(frame ? frame + (size_t)y * 600 + 300 : row, 300);
     epd_dtm_end();
     printf("epd: frame streamed, refreshing...\n");
 
     static const uint8_t z = 0x00;
-    epd_command(cs_both, 2, S, 0x04, NULL, 0);   sleep_ms(300);   /* PON */
-    epd_command(cs_both, 2, S, 0x12, &z, 1);     epd_wait_ready(60000);  /* DRF */
-    epd_command(cs_both, 2, S, 0x02, &z, 1);     sleep_ms(300);   /* POF */
+    epd_command(cs_both, 2, S, 0x04, NULL, 0);   sleep_ms(300);
+    epd_command(cs_both, 2, S, 0x12, &z, 1);     epd_wait_ready(60000);
+    epd_command(cs_both, 2, S, 0x02, &z, 1);     sleep_ms(300);
     printf("epd: refresh done\n");
 }
 
 /* ===================== Spectra 6 small (E673 7.3", E640 4.0") ===================== */
-/* Single controller. Shared init; the two panels differ only in TRES, the
- * post-DTM BTST2 rewrite byte, the refresh timeout, and E673's extra PSR
- * rewrite. UNTESTED. */
 
-static void run_spectra6_small(int width, int height, const uint8_t tres[4],
-                               uint8_t btst2_last, uint32_t drf_timeout_ms,
-                               const uint8_t *psr_rewrite /* 2 bytes or NULL */)
+static void paint_spectra6_small(int width, int height, const uint8_t tres[4],
+                                 uint8_t btst2_last, uint32_t drf_timeout_ms,
+                                 const uint8_t *psr_rewrite, const uint8_t *frame)
 {
-    epd_io_init(1 * 1000 * 1000);   /* 1 MHz per the reference */
+    epd_io_init(1 * 1000 * 1000);
     epd_cs_init(cs8);
     epd_reset(1, 30, 30, 300);
 
@@ -186,40 +180,40 @@ static void run_spectra6_small(int width, int height, const uint8_t tres[4],
     epd_command(&cs8, 1, S, 0x82, VDCS,  sizeof VDCS);
     printf("epd: init complete\n");
 
-    stream_single(cs8, S, 0x10, width, height, PAL_SPECTRA6, 6);
+    stream_single(cs8, S, width, height, frame, PAL_SPECTRA6, 6);
     printf("epd: frame streamed, refreshing...\n");
 
     const uint8_t btst2b[4] = {0x6F, 0x1F, 0x17, btst2_last};
     static const uint8_t z = 0x00;
-    epd_command(&cs8, 1, S, 0x04, NULL, 0);        sleep_ms(300);          /* PON */
-    epd_command(&cs8, 1, S, 0x06, btst2b, 4);                               /* BTST2 rewrite */
-    epd_command(&cs8, 1, S, 0x12, &z, 1);          epd_wait_ready(drf_timeout_ms); /* DRF */
-    epd_command(&cs8, 1, S, 0x02, &z, 1);          sleep_ms(300);          /* POF */
+    epd_command(&cs8, 1, S, 0x04, NULL, 0);    sleep_ms(300);
+    epd_command(&cs8, 1, S, 0x06, btst2b, 4);
+    epd_command(&cs8, 1, S, 0x12, &z, 1);      epd_wait_ready(drf_timeout_ms);
+    epd_command(&cs8, 1, S, 0x02, &z, 1);      sleep_ms(300);
     if (psr_rewrite) { epd_command(&cs8, 1, S, 0x00, psr_rewrite, 2); sleep_ms(300); }
     printf("epd: refresh done\n");
 }
 
-static void run_e673(uint8_t variant)
+static void paint_e673(uint8_t variant, const uint8_t *frame)
 {
     (void)variant;
-    static const uint8_t tres[4] = {0x03, 0x20, 0x01, 0xE0};   /* 800 x 480 */
+    static const uint8_t tres[4] = {0x03, 0x20, 0x01, 0xE0};
     static const uint8_t psr_rewrite[2] = {0x4F, 0x6E};
-    run_spectra6_small(800, 480, tres, 0x49, 40000, psr_rewrite);
+    paint_spectra6_small(800, 480, tres, 0x49, 40000, psr_rewrite, frame);
 }
 
-static void run_e640(uint8_t variant)
+static void paint_e640(uint8_t variant, const uint8_t *frame)
 {
     (void)variant;
-    static const uint8_t tres[4] = {0x01, 0x90, 0x02, 0x58};   /* 400 x 600 register order */
-    run_spectra6_small(600, 400, tres, 0x47, 50000, NULL);
+    static const uint8_t tres[4] = {0x01, 0x90, 0x02, 0x58};
+    paint_spectra6_small(600, 400, tres, 0x47, 50000, NULL, frame);
 }
 
 /* ===================== AC073TC1A, 7.3" 7-colour (untested) ===================== */
 
-static void run_ac073(uint8_t variant)
+static void paint_ac073(uint8_t variant, const uint8_t *frame)
 {
     (void)variant;
-    epd_io_init(5 * 1000 * 1000);   /* 5 MHz per the reference */
+    epd_io_init(5 * 1000 * 1000);
     epd_cs_init(cs8);
     epd_reset(2, 100, 100, 1000);
 
@@ -236,7 +230,7 @@ static void run_ac073(uint8_t variant)
     static const uint8_t TSE[]   = {0x00};
     static const uint8_t CDI[]   = {0x3F};
     static const uint8_t TCON[]  = {0x02, 0x00};
-    static const uint8_t TRES[]  = {0x03, 0x20, 0x01, 0xE0};   /* 800 x 480 */
+    static const uint8_t TRES[]  = {0x03, 0x20, 0x01, 0xE0};
     static const uint8_t VDCS[]  = {0x1E};
     static const uint8_t TVDCS[] = {0x00};
     static const uint8_t AGID[]  = {0x00};
@@ -265,26 +259,25 @@ static void run_ac073(uint8_t variant)
     epd_command(&cs8, 1, S, 0xE6, TSSET, sizeof TSSET);
     printf("epd: init complete\n");
 
-    stream_single(cs8, S, 0x10, 800, 480, PAL_7COLOUR, 7);
+    stream_single(cs8, S, 800, 480, frame, PAL_7COLOUR, 7);
     printf("epd: frame streamed, refreshing...\n");
 
     static const uint8_t z = 0x00;
-    epd_command(&cs8, 1, S, 0x04, NULL, 0);   sleep_ms(400);           /* PON */
-    epd_command(&cs8, 1, S, 0x12, &z, 1);     epd_wait_ready(50000);   /* DRF */
-    epd_command(&cs8, 1, S, 0x02, &z, 1);     sleep_ms(400);           /* POF */
+    epd_command(&cs8, 1, S, 0x04, NULL, 0);   sleep_ms(400);
+    epd_command(&cs8, 1, S, 0x12, &z, 1);     epd_wait_ready(50000);
+    epd_command(&cs8, 1, S, 0x02, &z, 1);     sleep_ms(400);
     printf("epd: refresh done\n");
 }
 
 /* ===================== UC8159, 7-colour (untested) ===================== */
-/* Two resolutions, selected by variant: 14 -> 600x448, 16 -> 640x400. */
 
-static void run_uc8159(uint8_t variant)
+static void paint_uc8159(uint8_t variant, const uint8_t *frame)
 {
     int width  = (variant == 16) ? 640 : 600;
     int height = (variant == 16) ? 400 : 448;
     uint8_t res_setting = (variant == 16) ? 0b10 : 0b11;
 
-    epd_io_init(3 * 1000 * 1000);   /* 3 MHz per the reference */
+    epd_io_init(3 * 1000 * 1000);
     epd_cs_init(cs8);
     epd_reset(1, 100, 100, 1000);
 
@@ -295,7 +288,7 @@ static void run_uc8159(uint8_t variant)
     static const uint8_t PWR[]  = {0x37, 0x00, 0x23, 0x23};
     static const uint8_t PLL[]  = {0x3C};
     static const uint8_t TSE[]  = {0x00};
-    static const uint8_t CDI[]  = {0x37};   /* border WHITE: (1<<5)|0x17 */
+    static const uint8_t CDI[]  = {0x37};
     static const uint8_t TCON[] = {0x22};
     static const uint8_t DAM[]  = {0x00};
     static const uint8_t PWS[]  = {0xAA};
@@ -313,28 +306,28 @@ static void run_uc8159(uint8_t variant)
     epd_command(&cs8, 1, S, 0x03, PFS,  sizeof PFS);
     printf("epd: init complete\n");
 
-    stream_single(cs8, S, 0x10, width, height, PAL_7COLOUR, 7);
+    stream_single(cs8, S, width, height, frame, PAL_7COLOUR, 7);
     printf("epd: frame streamed, refreshing...\n");
 
-    epd_command(&cs8, 1, S, 0x04, NULL, 0);   sleep_ms(200);           /* PON */
-    epd_command(&cs8, 1, S, 0x12, NULL, 0);   epd_wait_ready(40000);   /* DRF */
-    epd_command(&cs8, 1, S, 0x02, NULL, 0);   sleep_ms(200);           /* POF */
+    epd_command(&cs8, 1, S, 0x04, NULL, 0);   sleep_ms(200);
+    epd_command(&cs8, 1, S, 0x12, NULL, 0);   epd_wait_ready(40000);
+    epd_command(&cs8, 1, S, 0x02, NULL, 0);   sleep_ms(200);
     printf("epd: refresh done\n");
 }
 
 /* ===================== registry ===================== */
 
-static const uint8_t V_EL133[] = {21, 27};
-static const uint8_t V_E673[]  = {22, 26};
-static const uint8_t V_E640[]  = {25};
-static const uint8_t V_AC073[] = {20};
+static const uint8_t V_EL133[]  = {21, 27};
+static const uint8_t V_E673[]   = {22, 26};
+static const uint8_t V_E640[]   = {25};
+static const uint8_t V_AC073[]  = {20};
 static const uint8_t V_UC8159[] = {14, 15, 16};
 
-static const panel_t k_el133  = {"EL133UF1 13.3in Spectra 6", V_EL133, 2, 1200, 1600, 1, run_el133uf1};
-static const panel_t k_e673   = {"E673 7.3in Spectra 6",      V_E673,  2,  800,  480, 0, run_e673};
-static const panel_t k_e640   = {"E640 4.0in Spectra 6",      V_E640,  1,  600,  400, 0, run_e640};
-static const panel_t k_ac073  = {"AC073TC1A 7.3in 7-colour",  V_AC073, 1,  800,  480, 0, run_ac073};
-static const panel_t k_uc8159 = {"UC8159 7-colour",           V_UC8159, 3, 640,  448, 0, run_uc8159};
+static const panel_t k_el133  = {"EL133UF1 13.3in Spectra 6", V_EL133, 2, 1200, 1600, 1, paint_el133uf1};
+static const panel_t k_e673   = {"E673 7.3in Spectra 6",      V_E673,  2,  800,  480, 0, paint_e673};
+static const panel_t k_e640   = {"E640 4.0in Spectra 6",      V_E640,  1,  600,  400, 0, paint_e640};
+static const panel_t k_ac073  = {"AC073TC1A 7.3in 7-colour",  V_AC073, 1,  800,  480, 0, paint_ac073};
+static const panel_t k_uc8159 = {"UC8159 7-colour",           V_UC8159, 3, 640,  448, 0, paint_uc8159};
 
 static const panel_t *const k_panels[] = {
     &k_el133, &k_e673, &k_e640, &k_ac073, &k_uc8159,

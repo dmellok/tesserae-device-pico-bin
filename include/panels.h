@@ -19,8 +19,17 @@ typedef struct {
     uint16_t       width;
     uint16_t       height;
     uint8_t        verified;     /* 1 if confirmed on hardware, 0 if a blind port */
-    void         (*run)(uint8_t variant);  /* full sequence; variant for multi-res panels */
+    /* Full sequence: GPIO/SPI setup, reset, init, stream a frame, refresh.
+     * frame == NULL paints the built-in vertical-stripe test pattern; otherwise
+     * frame is the panel-native packed-4bpp buffer (width*height/2 bytes). */
+    void         (*paint)(uint8_t variant, const uint8_t *frame);
 } panel_t;
+
+/* Frame size in bytes for a panel (packed 4bpp, 2 px/byte). */
+static inline uint32_t panel_frame_bytes(const panel_t *p)
+{
+    return (uint32_t)p->width * p->height / 2;
+}
 
 /* Find the descriptor for an EEPROM display_variant, or NULL if unsupported. */
 const panel_t *panel_for_variant(uint8_t variant);

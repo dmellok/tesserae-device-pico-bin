@@ -11,12 +11,15 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "pico/stdlib.h"
+#include "pico/sha256.h"
 
 #include "inky_eeprom.h"
 #include "panels.h"
 #include "net_wifi.h"
 #include "net_mqtt.h"
+#include "net_http.h"
 #include "config.h"
 #include "psram.h"
 
@@ -25,6 +28,18 @@
 #    include "secrets.h"
 #  endif
 #endif
+
+/* 64-hex-char SHA-256 of a string, via the RP2350 hardware SHA block. */
+static void sha256_hex(const char *s, char out[65])
+{
+    pico_sha256_state_t st;
+    if (pico_sha256_try_start(&st, SHA256_BIG_ENDIAN, false) != 0) { out[0] = '\0'; return; }
+    pico_sha256_update(&st, (const uint8_t *)s, strlen(s));
+    sha256_result_t r;
+    pico_sha256_finish(&st, &r);
+    for (int i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", r.bytes[i]);
+    out[64] = '\0';
+}
 
 int main(void)
 {
@@ -103,44 +118,89 @@ int main(void)
         printf("no driver for variant %u\n", variant);
     }
 
-    /* Phase 3 (WIP): connect WiFi, then exercise MQTT against the broker, fetch
-     * the retained frame URL and publish a (stub) status. Phase 4 wires the
-     * download+paint, phase 6 the real heartbeat. Radio stays up for MQTT, then
-     * powers down before the slow refresh. */
+    /* Phase 4: connect WiFi, fetch the retained frame URL over MQTT, download
+     * it into a frame buffer (SRAM for small panels, PSRAM for the 13.3"), and
+     * dedup by SHA-256 of the URL so we only repaint when the image changes.
+     * Radio stays up for the network work, then powers down before the slow
+     * refresh and any flash write. (SNTP+sleep is phase 5, real heartbeat 6.) */
+    const uint8_t *frame    = NULL;   /* what we'll paint; NULL -> stripe test pattern */
+    uint8_t       *sram_buf = NULL;   /* malloc'd buffer to free after paint, if any */
+    bool           skip_paint = false;
+    bool           cfg_dirty  = false;
+    char           new_hash[65] = {0};
+
     if (config_has_wifi() && wifi_connect(c->wifi_ssid, c->wifi_pass, 20000)) {
         if (c->mqtt_uri[0] != '\0') {
             char url[200];
             int32_t sleep_s = c->sleep_s;
-            if (mqtt_fetch_retained(c->mqtt_uri, c->mqtt_device_id, c->mqtt_user,
-                                    c->mqtt_pass, url, sizeof url, &sleep_s, 8000)) {
-                printf("mqtt: got frame url (download+paint lands in phase 4): %s\n", url);
-            } else {
+            bool got_url = mqtt_fetch_retained(c->mqtt_uri, c->mqtt_device_id,
+                                               c->mqtt_user, c->mqtt_pass,
+                                               url, sizeof url, &sleep_s, 8000);
+            if (sleep_s != c->sleep_s) { config_set_sleep_s(sleep_s); cfg_dirty = true; }
+
+            if (got_url && panel != NULL) {
+                sha256_hex(url, new_hash);
+                if (new_hash[0] && strcmp(new_hash, c->last_hash) == 0) {
+                    printf("frame: unchanged (hash match); skipping refresh\n");
+                    skip_paint = true;
+                } else {
+                    uint32_t need = panel_frame_bytes(panel);
+                    uint8_t *buf = NULL;
+                    if (need <= 256u * 1024) buf = sram_buf = malloc(need);
+                    if (buf == NULL && psram_sz >= need) buf = (uint8_t *)PSRAM_XIP_BASE;
+                    if (buf == NULL) {
+                        printf("frame: no buffer for %u bytes (PSRAM board needed?)\n",
+                               (unsigned)need);
+                    } else {
+                        size_t got = 0;
+                        if (http_get(url, buf, need, &got, 30000) && got == need) {
+                            frame = buf;
+                        } else {
+                            printf("frame: fetch failed or wrong size (got %u, want %u)\n",
+                                   (unsigned)got, (unsigned)need);
+                        }
+                    }
+                }
+            } else if (!got_url) {
                 printf("mqtt: no retained frame url\n");
             }
-
-            char ip[16];
-            wifi_get_ip(ip, sizeof ip);
-            char status[200];
-            snprintf(status, sizeof status,
-                     "{\"fw_version\":\"0.1.0-pico\",\"kind\":\"esp32_client\","
-                     "\"ip\":\"%s\",\"rssi\":%d,\"panel_w\":%u,\"panel_h\":%u}",
-                     ip, wifi_rssi(), panel ? panel->width : 0, panel ? panel->height : 0);
-            mqtt_publish_status(c->mqtt_uri, c->mqtt_device_id, c->mqtt_user,
-                                c->mqtt_pass, status, 5000);
         } else {
             printf("mqtt: no broker configured (set MQTT_URI in secrets.h)\n");
         }
-        wifi_stop();   /* power the radio down before the slow refresh */
+
+        char ip[16];
+        wifi_get_ip(ip, sizeof ip);
+        char status[200];
+        snprintf(status, sizeof status,
+                 "{\"fw_version\":\"0.1.0-pico\",\"kind\":\"esp32_client\","
+                 "\"ip\":\"%s\",\"rssi\":%d,\"panel_w\":%u,\"panel_h\":%u}",
+                 ip, wifi_rssi(), panel ? panel->width : 0, panel ? panel->height : 0);
+        if (c->mqtt_uri[0] != '\0')
+            mqtt_publish_status(c->mqtt_uri, c->mqtt_device_id, c->mqtt_user,
+                                c->mqtt_pass, status, 5000);
+        wifi_stop();   /* radio down before the slow refresh + flash write */
     } else if (!config_has_wifi()) {
         printf("wifi: no SSID configured; skipping (portal comes in a later phase)\n");
     }
 
-    /* Paint. Phase 4 will swap the test pattern for the downloaded frame. */
-    if (panel != NULL) {
-        printf("painting vertical colour stripes (this takes ~20-45s)...\n");
-        panel->run(variant);
+    /* Paint the downloaded frame if we got one, else the stripe test pattern.
+     * Skip entirely when the frame is unchanged from last time. */
+    if (skip_paint) {
+        printf("paint: skipped (unchanged)\n");
+    } else if (panel != NULL) {
+        printf("painting %s (this takes ~20-45s)...\n",
+               frame ? "downloaded frame" : "test stripes");
+        panel->paint(variant, frame);
+        if (frame != NULL && new_hash[0]) {   /* remember what we painted */
+            config_set_last_hash(new_hash);
+            cfg_dirty = true;
+        }
         printf("done.\n");
     }
+    if (cfg_dirty) {   /* radio is down here, so the flash write is safe */
+        printf(config_save() ? "config: saved\n" : "config: SAVE FAILED\n");
+    }
+    if (sram_buf != NULL) free(sram_buf);
 
     while (true) tight_loop_contents();
 }
