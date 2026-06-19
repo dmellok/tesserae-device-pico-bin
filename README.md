@@ -193,6 +193,31 @@ The init-sequence argument blobs in `src/panels.c` come from the Pimoroni Inky
 drivers. Do not edit the canned parameter values. To add a panel, add a `run()`
 and a `panel_t` descriptor with its variant ids.
 
+## Porting to another board
+
+Nothing here is specific to the Pico Plus 2 W. The firmware only uses standard
+GPIOs (GP2, 3, 8, 10, 11, 16, 17, 22, 26, 27, all in the GP0-29 range present on
+every Pico), drives the panel with `SPI1` (SCK=GP10, TX=GP11, the same on RP2040
+and RP2350), streams the frame row by row so it needs almost no RAM or flash,
+and never touches PSRAM or the wireless radio.
+
+- **Another Pico in the same Hard Stuff adapter** (Pico 2 / 2 W, Plus 2 non-W,
+  original Pico / Pico W): change `board` in `platformio.ini` to the matching id
+  (for example `rpipico2`, `pimoroni_pico_plus_2w`, `rpipico`, `rpipicow`); the
+  `picosdk` framework supports them all. The adapter is fixed and the pins are
+  standard, so the mapping is unchanged. Verified only on the Plus 2 W, but it
+  should build and run on any of these.
+- **A different adapter or direct wiring:** edit the transport pins in
+  [`include/epd_io.h`](include/epd_io.h) and the per-panel chip-select in
+  [`src/panels.c`](src/panels.c) to match your wiring. Use hardware-SPI-capable
+  pins for SCLK/MOSI to keep the SPI block. The panel quirks (300 ms command
+  setup for Spectra 6, BUSY active low, SPI speeds) are panel properties, not
+  board properties, so they carry over.
+- **A non-RP board (ESP32, STM32, ...):** not supported as-is; it is pico-sdk C.
+  Only the `epd_io` transport layer would need porting; the panel sequences in
+  `panels.c` would carry over (this is essentially what `tesserae-device-esp32
+  -bin` already does for the 13.3").
+
 ## Not in this MVP
 
 WiFi, MQTT, HTTP frame fetch, PNG/.bin decoding, deep sleep and wake, battery
