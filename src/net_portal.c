@@ -24,6 +24,7 @@
 #include "dnsserver.h"
 #include "net_mdns.h"
 #include "splash.h"
+#include "sleepmgr.h"
 #include "config.h"
 
 /* ---------- page markup (verbatim from tesserae-device-esp32-bin) ---------- */
@@ -314,6 +315,7 @@ static void build_picker(char *dst, size_t cap)
 static char           s_resp[PAGE_MAX];   /* one connection serviced at a time */
 static volatile bool  s_reboot_pending;
 static volatile bool  s_rescan_pending;   /* set by GET /rescan; run in main loop */
+static volatile bool  s_client_seen;      /* set on each connection; resets idle timer */
 
 typedef struct {
     char     req[REQ_MAX];
@@ -480,6 +482,7 @@ static err_t accept_cb(void *arg, struct tcp_pcb *pcb, err_t err)
     if (err != ERR_OK || pcb == NULL) return ERR_VAL;
     conn_t *c = (conn_t *)calloc(1, sizeof(conn_t));
     if (!c) { tcp_abort(pcb); return ERR_ABRT; }
+    s_client_seen = true;   /* activity: keep the portal awake */
     tcp_arg(pcb, c);
     tcp_recv(pcb, recv_cb);
     tcp_err(pcb, err_cb);
@@ -538,12 +541,24 @@ void portal_run(const panel_t *panel, uint8_t variant)
 
     /* Service the portal (threadsafe-background runs lwIP for us) until the user
      * submits the form. A Rescan link sets s_rescan_pending, which we service
-     * here in the main loop (never in an lwIP callback, since the scan blocks). */
+     * here in the main loop (never in an lwIP callback, since the scan blocks).
+     *
+     * Idle timeout: if no client connects for IDLE_TIMEOUT_MS, power the AP down
+     * with no wake source so a forgotten setup AP does not drain the battery.
+     * A reset (button) brings it back into the portal. Any connection resets
+     * the timer. */
+    const uint32_t IDLE_TIMEOUT_MS = 15u * 60u * 1000u;
+    uint32_t idle_ms = 0;
     while (!s_reboot_pending) {
         if (s_rescan_pending) {
             s_rescan_pending = false;
             printf("portal: rescan requested\n");
             wifi_scan();
+        }
+        if (s_client_seen) { s_client_seen = false; idle_ms = 0; }
+        else if ((idle_ms += 50) >= IDLE_TIMEOUT_MS) {
+            printf("portal: no activity for 15 min; powering down (press reset to wake)\n");
+            sleep_deep_until_reset();   /* does not return */
         }
         sleep_ms(50);
     }

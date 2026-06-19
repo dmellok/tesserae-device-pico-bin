@@ -45,3 +45,7 @@ uint32_t sleep_epoch_now(void);
 /* Power-gate the chip and wake via the POWMAN alarm after `ms`. Does not
  * return: the chip resets and main() re-runs on wake. */
 void sleep_deep_ms(uint64_t ms);
+
+/* Power-gate the chip with no wake source armed: only a reset (button) or power
+ * cycle brings it back. Does not return. Used by the portal idle timeout. */
+void sleep_deep_until_reset(void);

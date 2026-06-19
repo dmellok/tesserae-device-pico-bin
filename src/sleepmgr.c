@@ -113,7 +113,7 @@ uint32_t sleep_epoch_now(void)
     return (ms > EPOCH_VALID_MS) ? (uint32_t)(ms / 1000ull) : 0;
 }
 
-void sleep_deep_ms(uint64_t ms)
+static void power_down(bool arm_alarm, uint64_t ms)
 {
     sleep_timer_init();
     uint64_t now = powman_timer_get_ms();
@@ -166,10 +166,16 @@ void sleep_deep_ms(uint64_t ms)
     powman_hw->boot[2] = 0;
     powman_hw->boot[3] = 0;
 
-    powman_enable_alarm_wakeup_at_ms(now + ms);
+    /* Arm the timer alarm for a timed sleep; otherwise power down with no wake
+     * source so only a reset (button) or power cycle brings it back. */
+    if (arm_alarm) powman_enable_alarm_wakeup_at_ms(now + ms);
+    else           powman_disable_alarm_wakeup();
 
     powman_set_power_state(off);
 
     /* Power down. The wake event resets the chip, so this never returns. */
     while (true) __asm volatile ("wfi");
 }
+
+void sleep_deep_ms(uint64_t ms)     { power_down(true, ms); }
+void sleep_deep_until_reset(void)   { power_down(false, 0); }
