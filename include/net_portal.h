@@ -9,7 +9,10 @@
  */
 #pragma once
 
+#include <stdint.h>
+#include "panels.h"
+
 /* Bring up the provisioning AP + portal and service it until the user submits
  * the form, at which point the config is saved and the device reboots. Does
- * not return. */
-void portal_run(void);
+ * not return. The panel (if any) is used to paint the setup splash. */
+void portal_run(const panel_t *panel, uint8_t variant);

@@ -23,6 +23,7 @@
 #include "dhcpserver.h"
 #include "dnsserver.h"
 #include "net_mdns.h"
+#include "splash.h"
 #include "config.h"
 
 /* ---------- page markup (verbatim from tesserae-device-esp32-bin) ---------- */
@@ -487,13 +488,8 @@ static err_t accept_cb(void *arg, struct tcp_pcb *pcb, err_t err)
 
 /* ---------- portal entry ---------- */
 
-void portal_run(void)
+void portal_run(const panel_t *panel, uint8_t variant)
 {
-    if (cyw43_arch_init_with_country(CYW43_COUNTRY_WORLDWIDE)) {
-        printf("portal: cyw43 init failed\n");
-        return;
-    }
-
     /* Per-board suffix from the flash unique ID (always available; the CYW43
      * interface MACs read 0 before the interface is up). */
     pico_unique_board_id_t bid;
@@ -502,6 +498,15 @@ void portal_run(void)
     snprintf(ssid, sizeof ssid, "Tesserae-Setup-%02X%02X",
              bid.id[PICO_UNIQUE_BOARD_ID_SIZE_BYTES - 2],
              bid.id[PICO_UNIQUE_BOARD_ID_SIZE_BYTES - 1]);
+
+    /* Paint the setup splash first (instructions + join QR) while the radio is
+     * still down, then bring up the AP. */
+    splash_show_setup(panel, variant, ssid);
+
+    if (cyw43_arch_init_with_country(CYW43_COUNTRY_WORLDWIDE)) {
+        printf("portal: cyw43 init failed\n");
+        return;
+    }
     printf("portal: starting AP '%s' (open); browse to http://192.168.4.1/\n", ssid);
 
     cyw43_arch_enable_ap_mode(ssid, NULL, CYW43_AUTH_OPEN);

@@ -270,7 +270,7 @@ int main(void)
 
 #ifdef DEV_FORCE_PORTAL
     printf("dev: forcing provisioning portal\n");
-    portal_run();
+    portal_run(panel, variant);
 #endif
 
     /* No WiFi credentials yet: come up as a setup AP and serve the provisioning
@@ -278,7 +278,7 @@ int main(void)
      * returns. (secrets.h, if present, seeds creds and skips this.) */
     if (!config_has_wifi()) {
         printf("config: no WiFi credentials; entering provisioning portal\n");
-        portal_run();
+        portal_run(panel, variant);
     }
 
     /* Run one cycle, then either deep-sleep until the next refresh or, in dev
