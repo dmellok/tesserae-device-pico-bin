@@ -1,14 +1,25 @@
 # tesserae-device-pico-bin
 
-Firmware for driving a **Pimoroni Inky Impression** e-paper panel from a
-**Pimoroni Pico Plus 2 W** (RP2350B), written in C against the Raspberry Pi Pico
-SDK. It reads the Inky's model EEPROM at boot, picks the matching panel driver,
-and paints a hardcoded test pattern of vertical colour stripes, to prove the
-panel paints what the firmware tells it to. No networking, no sleep, no Tesserae
-integration yet; those are later layers.
+A battery-friendly **Tesserae** e-paper client for a **Pimoroni Inky Impression**
+panel driven by a **Pimoroni Pico Plus 2 W** (RP2350B), written in C against the
+Raspberry Pi Pico SDK. It is part of the Tesserae self-hosted e-ink dashboard
+ecosystem, alongside `tesserae-device-esp32-bin` and the other
+`tesserae-device-*` firmwares.
 
-It is part of the Tesserae self-hosted e-ink dashboard ecosystem, alongside
-`tesserae-device-esp32-bin` and the other `tesserae-device-*` firmwares.
+Each wake it runs one cycle: detect the panel from its model EEPROM, connect
+WiFi, sync time over SNTP, read the retained frame URL + config from the
+Tesserae MQTT broker, download the panel-native `.bin` frame into PSRAM, paint
+it (skipping the slow refresh when the frame is unchanged), publish a heartbeat,
+then **POWMAN deep sleep** until the next refresh. With no WiFi credentials it
+comes up as a captive-portal setup AP instead. The headline pieces:
+
+- WiFi (CYW43) + lwIP, MQTT, SNTP, HTTP frame fetch
+- 8 MB QMI PSRAM for the 960 KB 13.3" frame; SHA-256 dedup so an unchanged
+  frame never triggers a refresh
+- Real RP2350 POWMAN deep sleep (LPOSC-trimmed), wake-reason tracking
+- Captive provisioning portal (setup AP + DHCP + DNS hijack + WiFi scan + form),
+  mDNS (`tesserae-pico-XXXX.local`), and an on-device procedural setup splash
+- Reports `kind=pico_bin_client` to Tesserae (see "Tesserae server" below)
 
 ### Supported panels
 
@@ -32,23 +43,35 @@ Note: an earlier attempt ported the Waveshare ESP32 demo for the bare EL133UF1
 and the panel stayed blank; the Inky needs its own power configuration, so it is
 not a drop-in for the Waveshare panel. All drivers here follow the Inky sources.
 
-## What you should see
+## Operation
 
-After flashing, the panel refreshes (roughly 20 to 45 seconds; e-paper is slow
-and the time varies) and shows vertical colour stripes. On a 6-colour Spectra 6
-panel that is six stripes; on a 7-colour panel, seven. For the 13.3", left to
-right:
+On boot the firmware identifies the panel, then:
 
-```
-| black | white | red | green | blue | yellow |
-\------ CS_M (left) ------/\----- CS_S (right) -----/
-        columns 0..599            columns 600..1199
-```
+- **No WiFi credentials** (fresh device): it paints the setup splash (Tesserae
+  logo, the AP name, the portal URL, and a join QR), brings up an open
+  `Tesserae-Setup-XXXX` access point with a captive portal, and serves a form to
+  enter WiFi + MQTT settings. Saving reboots and applies them.
+- **Configured**: connect WiFi, SNTP, read the retained frame URL + config from
+  `tesserae/<device_id>/{frame/bin,config}`, download the `.bin`, and paint it
+  (a full refresh is ~20-45 s; e-paper is slow). If the frame URL is unchanged
+  since last time (SHA-256 match) the refresh is skipped. It then publishes a
+  retained heartbeat to `tesserae/<device_id>/status` and deep-sleeps for the
+  configured `sleep_interval_s`, waking to repeat.
 
-The split down the middle is deliberate: the panel has two controllers, one per
-half, selected by separate chip-select lines. The left three stripes go to
-`CS_M`, the right three to `CS_S`. A clean seam at the centre means the dual
-controller split is working.
+The 13.3" panel has two controllers split at column 600 (`CS_M` left half,
+`CS_S` right). The driver replicates the Pimoroni `inky_el133uf1` transform:
+the landscape frame is rotated 90 deg and split, so a portrait composition
+displays upright. A `frame == NULL` path still paints the six/seven colour
+stripe test pattern as a fallback.
+
+### Tesserae server
+
+This device deep-sleeps, so it needs the frame published **retained** (it reads
+the topic on wake), and it does the rotate on-device, so it needs the frame in
+the panel's **native landscape** orientation. Register the device in Tesserae as
+**`pico_bin_client`** (the `pico_bin` renderer: landscape pack + `retain: true`).
+The firmware reports that kind in its heartbeat so Settings -> Devices pre-fills
+it.
 
 ## Hardware
 
@@ -171,28 +194,45 @@ pio device monitor   # 115200 baud
 Expected output:
 
 ```
-tesserae-device-pico-bin: painting six vertical stripes
+tesserae-device-pico-bin
+psram: 8388608 bytes detected; self-test PASS
+config: wifi_ssid='turtle' device_id='pico_lounge' sleep_s=900 last_hash=set
 eeprom: 1600x1200 variant=21 (Spectra 6 13.3 1600 x 1200 (EL133UF1))
-epd: init complete
-epd: streaming frame...
-epd: refreshing (this takes ~30s on Spectra 6)...
-epd: refresh complete after 33800ms
-epd: refresh done
-done. the panel should now show: black white red | green blue yellow
+panel: EL133UF1 13.3in Spectra 6 (1200x1600)
+wake: timer (boot #42)
+wifi: connected, ip=192.168.50.66 rssi=-54
+mdns: advertising tesserae-pico-30b3.local
+sntp: epoch=1781852034
+mqtt: frame url = http://192.168.50.125:8765/renders/<hash>.bin
+frame: unchanged (hash match); skipping refresh
+mqtt: status published (243 bytes)
+paint: skipped (unchanged)
+sleep: deep sleep for 900 s (wake reboots)
 ```
 
 ## Source layout
 
 | File | Purpose |
 | --- | --- |
-| [`include/epd_io.h`](include/epd_io.h) / [`src/epd_io.c`](src/epd_io.c) | Shared transport: hardware SPI1, D/C, reset, BUSY wait, command + frame-stream helpers. Fixed pins (SCLK/MOSI/DC/RST/BUSY); CS passed in per panel. |
-| [`include/panels.h`](include/panels.h) / [`src/panels.c`](src/panels.c) | One descriptor + `run()` per panel (init sequence, geometry, CS scheme, stripe pattern), plus the variant-to-panel registry. Sequences ported from the Pimoroni Inky drivers. |
-| [`include/inky_eeprom.h`](include/inky_eeprom.h) / [`src/inky_eeprom.c`](src/inky_eeprom.c) | Bit-banged I2C reader for the Inky model EEPROM (panel detection). |
-| [`src/main.c`](src/main.c) | Reads the EEPROM, looks up the panel by variant, runs its driver. |
+| [`src/main.c`](src/main.c) | Orchestrates one wake cycle: panel detect, portal-or-connect, fetch + dedup + paint, heartbeat, deep sleep. |
+| [`src/epd_io.c`](src/epd_io.c) / [`src/panels.c`](src/panels.c) | Shared SPI1 transport, and one descriptor + `paint(variant, frame)` per panel (init + geometry + CS + the 13.3" rotate/split). Sequences from the Pimoroni Inky drivers. |
+| [`src/inky_eeprom.c`](src/inky_eeprom.c) | Bit-banged I2C reader for the model EEPROM (panel detection). |
+| [`src/config.c`](src/config.c) | Flash-backed key-value config store (WiFi/MQTT/sleep/last-frame-hash). |
+| [`src/psram.c`](src/psram.c) | RP2350 QMI PSRAM (APS6404) bring-up for the 960 KB frame buffer. |
+| [`src/net_wifi.c`](src/net_wifi.c) / [`src/net_mqtt.c`](src/net_mqtt.c) / [`src/net_http.c`](src/net_http.c) / [`src/net_sntp.c`](src/net_sntp.c) | CYW43/lwIP WiFi, MQTT (retained frame/config + status), HTTP frame fetch, SNTP. |
+| [`src/net_mdns.c`](src/net_mdns.c) / [`src/net_portal.c`](src/net_portal.c) | mDNS advertising and the captive provisioning portal (AP + DHCP + DNS hijack + scan + form). |
+| [`src/sleepmgr.c`](src/sleepmgr.c) | POWMAN deep sleep + wake reason + LPOSC-trimmed wall-clock. |
+| [`src/splash.c`](src/splash.c) | On-device procedural setup splash (logo + text + QR). |
+| [`src/vendor/`](src/vendor) | Third-party: DHCP/DNS servers, QR encoder. See [NOTICES.md](NOTICES.md). |
 
 The init-sequence argument blobs in `src/panels.c` come from the Pimoroni Inky
-drivers. Do not edit the canned parameter values. To add a panel, add a `run()`
-and a `panel_t` descriptor with its variant ids.
+drivers. Do not edit the canned parameter values. To add a panel, add a
+`paint()` and a `panel_t` descriptor with its variant ids.
+
+Development overrides (build flags or `secrets.h` defines, all off by default):
+`DEV_SLEEP_S` (pin/disable the sleep interval; 0 = stay awake), `DEV_FORCE_REPAINT`
+(ignore the dedup), `DEV_FRAME_URL` (fetch a fixed URL), `DEV_FORCE_PORTAL`
+(force the setup portal). See [`include/secrets.example.h`](include/secrets.example.h).
 
 ## Porting to another board
 
@@ -219,13 +259,14 @@ and never touches PSRAM or the wireless radio.
   `panels.c` would carry over (this is essentially what `tesserae-device-esp32
   -bin` already does for the 13.3").
 
-## Not in this MVP
+## Not implemented
 
-WiFi, MQTT, HTTP frame fetch, PNG/.bin decoding, deep sleep and wake, battery
-monitoring, OTA, captive portal, and Tesserae server protocol integration. These
-come later as separate layers on top of this driver.
+Battery monitoring (the heartbeat reports `battery_*: 0`; no sense ADC is wired)
+and OTA updates. A LAN settings editor was scoped out: a deep-sleep device is not
+a persistent web server, so deployed units are reconfigured via the setup portal.
 
 ## License
 
-AGPL-3.0-or-later, matching the sibling `tesserae-device-*` repositories. See
-[LICENSE](LICENSE).
+AGPL-3.0-or-later (see [LICENSE](LICENSE)), matching the sibling
+`tesserae-device-*` repositories. Bundled third-party code (DHCP/DNS servers,
+font, QR encoder) keeps its own permissive license; see [NOTICES.md](NOTICES.md).
