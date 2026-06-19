@@ -46,6 +46,8 @@
 #define LWIP_DHCP_DOES_ACD_CHECK    0
 #define LWIP_IGMP                   1   /* needed for mDNS multicast */
 #define SO_REUSE                    1
+#define LWIP_ALTCP                  1   /* lwIP HTTP client is built on altcp */
+#define LWIP_ALTCP_TLS              0   /* HTTP only for now, no TLS */
 
 /* extra timeouts headroom for the apps (DHCP/DNS/SNTP/MQTT/mDNS timers) */
 #define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8)

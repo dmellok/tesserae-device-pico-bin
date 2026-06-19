@@ -19,6 +19,6 @@ apps = join(fw, "lib", "lwip", "src", "apps")
 lib = env.BuildLibrary(
     join("$BUILD_DIR", "LwipApps"),
     apps,
-    "-<*> +<mqtt/mqtt.c>",
+    "-<*> +<mqtt/mqtt.c> +<http/http_client.c>",
 )
 env.Append(LIBS=[lib])
