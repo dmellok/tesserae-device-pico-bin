@@ -52,6 +52,11 @@
 /* extra timeouts headroom for the apps (DHCP/DNS/SNTP/MQTT/mDNS timers) */
 #define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8)
 
+/* MQTT output buffer: must hold a full publish (topic + payload + header). The
+ * default 256 is too small for the ~210-byte heartbeat JSON at QoS1+retain,
+ * which fails with ERR_MEM. 1024 leaves comfortable headroom. */
+#define MQTT_OUTPUT_RINGBUF_SIZE    1024
+
 /* SNTP (phase 5): resolve the server by name, and deliver the epoch through an
  * assignment into net_sntp.c's globals (no cross-file prototype to maintain).
  * The extern decls live inside the macro so they are only seen where sntp.c

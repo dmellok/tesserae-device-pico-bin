@@ -116,13 +116,31 @@ static void do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
             printf("mqtt: no broker configured (set MQTT_URI in secrets.h)\n");
         }
 
+        /* Heartbeat (full ESP32-client parity). Battery is reported as 0 (this
+         * board has no battery-sense ADC wired). wake_reason uses the server's
+         * vocabulary ("timer"/"poweron"); sleep_until is omitted when the clock
+         * is unsynced so the server falls back to its tolerance window. */
         char ip[16];
         wifi_get_ip(ip, sizeof ip);
-        char status[200];
-        snprintf(status, sizeof status,
+        int32_t      interval = c->sleep_s;
+        uint32_t     epoch    = sleep_epoch_now();
+        const char  *wreason  = (sleep_wake_reason() == WAKE_TIMER) ? "timer" : "poweron";
+        char status[320];
+        int n = snprintf(status, sizeof status,
                  "{\"fw_version\":\"0.1.0-pico\",\"kind\":\"pico_bin_client\","
-                 "\"ip\":\"%s\",\"rssi\":%d,\"panel_w\":%u,\"panel_h\":%u}",
-                 ip, wifi_rssi(), panel ? panel->width : 0, panel ? panel->height : 0);
+                 "\"battery_mv\":0,\"battery_pct\":0,"
+                 "\"rssi\":%d,\"ip\":\"%s\",\"panel_w\":%u,\"panel_h\":%u,"
+                 "\"sleep_interval_s\":%ld,\"next_sleep_s\":%ld,"
+                 "\"wake_reason\":\"%s\",\"boot\":%u",
+                 wifi_rssi(), ip, panel ? panel->width : 0, panel ? panel->height : 0,
+                 (long)interval, (long)interval, wreason, (unsigned)sleep_boot_count());
+        if (n > 0 && (size_t)n < sizeof status) {
+            if (epoch && interval > 0)
+                snprintf(status + n, sizeof status - n,
+                         ",\"sleep_until\":%lu}", (unsigned long)(epoch + interval));
+            else
+                snprintf(status + n, sizeof status - n, "}");
+        }
         if (c->mqtt_uri[0] != '\0')
             mqtt_publish_status(c->mqtt_uri, c->mqtt_device_id, c->mqtt_user,
                                 c->mqtt_pass, status, 5000);
@@ -131,18 +149,29 @@ static void do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
         printf("wifi: no SSID configured; skipping (portal comes in a later phase)\n");
     }
 
-    /* Paint the downloaded frame if we got one, else the stripe test pattern.
-     * Skip entirely when the frame is unchanged from last time. */
+    /* Decide what to paint:
+     *   - dedup hit  -> skip (frame unchanged).
+     *   - got a frame -> paint it, remember its hash.
+     *   - no frame this cycle (no URL / fetch failed): if we have painted a real
+     *     frame before (last_hash set), KEEP the current image rather than
+     *     clobbering it with the stripe test pattern. The server briefly clears
+     *     the retained frame during a re-render, so a transient miss is normal.
+     *     Only paint stripes on a fresh device that has never shown a frame, as
+     *     a liveness/bring-up indicator. */
     if (skip_paint) {
         printf("paint: skipped (unchanged)\n");
-    } else if (panel != NULL) {
-        printf("painting %s (this takes ~20-45s)...\n",
-               frame ? "downloaded frame" : "test stripes");
+    } else if (panel == NULL) {
+        /* no driver; nothing to paint */
+    } else if (frame != NULL) {
+        printf("painting downloaded frame (this takes ~20-45s)...\n");
         panel->paint(variant, frame);
-        if (frame != NULL && new_hash[0]) {   /* remember what we painted */
-            config_set_last_hash(new_hash);
-            cfg_dirty = true;
-        }
+        if (new_hash[0]) { config_set_last_hash(new_hash); cfg_dirty = true; }
+        printf("done.\n");
+    } else if (c->last_hash[0] != '\0') {
+        printf("paint: no frame this cycle; keeping last image\n");
+    } else {
+        printf("painting test stripes (no frame yet; this takes ~20-45s)...\n");
+        panel->paint(variant, NULL);
         printf("done.\n");
     }
     if (cfg_dirty) {   /* radio is down here, so the flash write is safe */
