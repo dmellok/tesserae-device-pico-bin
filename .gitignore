@@ -15,3 +15,6 @@
 
 # Local credential / config overrides, if ever added (mirrors the esp32 repo)
 include/secrets.h
+
+# Local-only Claude Code project guidance (not shared)
+CLAUDE.md
