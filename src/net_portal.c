@@ -65,6 +65,9 @@ static const char k_head[] =
 "font-weight:600;padding:8px 10px;cursor:pointer;border-radius:4px}"
 ".pw button:hover{background:var(--accent-soft)}"
 ".hint{margin-top:6px;font-size:12px;color:var(--muted)}"
+".rescan{display:inline-block;margin-top:10px;font-size:13px;font-weight:600;"
+"color:var(--accent);text-decoration:none}"
+".rescan:hover{text-decoration:underline}"
 ".hint code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"
 "background:#fafaf9;padding:1px 5px;border-radius:3px;border:1px solid var(--border);font-size:11px}"
 "button.submit{width:100%;padding:12px 16px;border:0;border-radius:8px;"
@@ -85,7 +88,7 @@ static const char k_head[] =
 "<span>Tesserae</span></div>"
 "<p class=\"tag\">Device setup</p>";
 
-/* WiFi card; %s = ssid prefill */
+/* WiFi card; %s x2 = (ssid prefill, scan-picker HTML or "") */
 static const char k_form_wifi_fmt[] =
 "<form method=\"POST\" action=\"/save\">"
 "<section class=\"card\"><h2>WiFi network</h2>"
@@ -94,6 +97,7 @@ static const char k_form_wifi_fmt[] =
 "<input id=\"ssid\" name=\"ssid\" required maxlength=\"32\" "
 "autocomplete=\"off\" value=\"%s\" placeholder=\"my-home-wifi\">"
 "</div>"
+"%s"
 "<div class=\"field pw\">"
 "<label for=\"wifi-pw\">Password</label>"
 "<input id=\"wifi-pw\" name=\"pass\" type=\"password\" maxlength=\"64\" autocomplete=\"off\">"
@@ -141,13 +145,17 @@ static const char k_tail[] =
 "b.textContent=s?'Hide':'Show';"
 "});"
 "});"
+"const pick=document.getElementById('ssid-pick');"
+"if(pick){pick.addEventListener('change',e=>{"
+"if(e.target.value){document.getElementById('ssid').value=e.target.value;"
+"document.getElementById('wifi-pw').focus();}"
+"});}"
 "</script></main></body></html>";
 
 static const char k_thanks_html[] =
 "<!doctype html><html><head><meta charset=\"utf-8\">"
 "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-"<title>Saved</title>"
-"<style>"
+"<title>Saved</title><style>"
 "body{margin:0;padding:40px 16px;background:#f1f0ec;color:#18181b;"
 "font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;text-align:center}"
 ".card{max-width:380px;margin:0 auto;background:#fff;border:1px solid #e6e5e1;"
@@ -157,6 +165,22 @@ static const char k_thanks_html[] =
 "</style></head><body>"
 "<div class=\"card\"><h1>Saved</h1>"
 "<p>Tesserae will reboot and apply the new settings now.</p></div>"
+"</body></html>";
+
+/* Shown while a rescan runs; auto-reloads the form once it completes. */
+static const char k_scanning_html[] =
+"<!doctype html><html><head><meta charset=\"utf-8\">"
+"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+"<meta http-equiv=\"refresh\" content=\"9;url=/\"><title>Scanning</title><style>"
+"body{margin:0;padding:40px 16px;background:#f1f0ec;color:#18181b;"
+"font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;text-align:center}"
+".card{max-width:380px;margin:0 auto;background:#fff;border:1px solid #e6e5e1;"
+"border-radius:10px;padding:28px 20px}"
+"h1{margin:0 0 8px;font-size:20px;color:#0d8c7e}"
+"p{margin:0;color:#71706c;font-size:14px;line-height:1.5}"
+"</style></head><body>"
+"<div class=\"card\"><h1>Scanning&hellip;</h1>"
+"<p>Looking for nearby networks. This page reloads automatically.</p></div>"
 "</body></html>";
 
 /* ---------- helpers (from the esp32 portal) ---------- */
@@ -221,6 +245,65 @@ static bool form_field(const char *body, const char *key, char *dst, size_t dst_
     return false;
 }
 
+/* ---------- WiFi scan (populate the form's network picker) ---------- */
+
+#define SCAN_MAX 16
+static char s_scan[SCAN_MAX][33];
+static int  s_scan_count;
+
+static int scan_cb(void *env, const cyw43_ev_scan_result_t *r)
+{
+    (void)env;
+    if (!r || r->ssid_len == 0 || r->ssid_len > 32) return 0;
+    if (s_scan_count >= SCAN_MAX) return 0;
+    char ssid[33];
+    memcpy(ssid, r->ssid, r->ssid_len);
+    ssid[r->ssid_len] = '\0';
+    for (int i = 0; i < s_scan_count; i++)
+        if (strcmp(s_scan[i], ssid) == 0) return 0;   /* dedup */
+    memcpy(s_scan[s_scan_count++], ssid, (size_t)r->ssid_len + 1);
+    return 0;
+}
+
+/* Scan for nearby APs and (re)fill the picker cache. Runs in whatever mode is
+ * active (we scan while the AP is up so a rescan never drops the client). Must
+ * be called from the main loop, not an lwIP callback (it blocks ~5s). */
+static void wifi_scan(void)
+{
+    s_scan_count = 0;
+    cyw43_wifi_scan_options_t opts;
+    memset(&opts, 0, sizeof opts);
+    cyw43_arch_lwip_begin();
+    int err = cyw43_wifi_scan(&cyw43_state, &opts, NULL, scan_cb);
+    cyw43_arch_lwip_end();
+    if (err != 0) { printf("portal: scan start failed (%d)\n", err); return; }
+    uint32_t t = 0;
+    while (cyw43_wifi_scan_active(&cyw43_state) && t < 8000) { sleep_ms(100); t += 100; }
+    printf("portal: scan found %d networks\n", s_scan_count);
+}
+
+/* Render the network picker (a <select> of scanned SSIDs when any) plus a
+ * Rescan link, into dst. Always emits the field so the user can rescan. */
+static void build_picker(char *dst, size_t cap)
+{
+    size_t n = 0;
+    n += (size_t)snprintf(dst + n, cap - n, "<div class=\"field\">");
+    if (s_scan_count > 0) {
+        n += (size_t)snprintf(dst + n, cap - n,
+            "<label for=\"ssid-pick\">Or pick a nearby network</label>"
+            "<select id=\"ssid-pick\"><option value=\"\">Choose a network&hellip;</option>");
+        for (int i = 0; i < s_scan_count && n < cap - 96; i++) {
+            char esc[100];
+            html_escape(s_scan[i], esc, sizeof esc);
+            n += (size_t)snprintf(dst + n, cap - n, "<option>%s</option>", esc);
+        }
+        n += (size_t)snprintf(dst + n, cap - n, "</select>");
+    }
+    n += (size_t)snprintf(dst + n, cap - n,
+        "<a class=\"rescan\" href=\"/rescan\">&#x21bb; %s</a></div>",
+        s_scan_count > 0 ? "Rescan networks" : "Scan for networks");
+}
+
 /* ---------- HTTP server (raw TCP) ---------- */
 
 #define REQ_MAX   1280
@@ -228,6 +311,7 @@ static bool form_field(const char *body, const char *key, char *dst, size_t dst_
 
 static char           s_resp[PAGE_MAX];   /* one connection serviced at a time */
 static volatile bool  s_reboot_pending;
+static volatile bool  s_rescan_pending;   /* set by GET /rescan; run in main loop */
 
 typedef struct {
     char     req[REQ_MAX];
@@ -259,10 +343,13 @@ static size_t build_form(void)
 
     /* Body is assembled after the header; we backfill Content-Length once known.
      * Simpler: build body in a scratch, then emit headers + body. */
+    static char picker[640];
+    build_picker(picker, sizeof picker);
+
     static char body[PAGE_MAX - 256];
     int n = 0;
     n += snprintf(body + n, sizeof body - n, "%s", k_head);
-    n += snprintf(body + n, sizeof body - n, k_form_wifi_fmt, ssid);
+    n += snprintf(body + n, sizeof body - n, k_form_wifi_fmt, ssid, picker);
     n += snprintf(body + n, sizeof body - n, k_form_mqtt_fmt, uri, devid, user);
     n += snprintf(body + n, sizeof body - n, "%s", k_tail);
 
@@ -274,13 +361,13 @@ static size_t build_form(void)
     return (size_t)(h + n);
 }
 
-static size_t build_thanks(void)
+static size_t build_static(const char *html)
 {
-    int n = (int)strlen(k_thanks_html);
+    int n = (int)strlen(html);
     int h = snprintf(s_resp, sizeof s_resp,
                      "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
                      "Content-Length: %d\r\nConnection: close\r\n\r\n", n);
-    memcpy(s_resp + h, k_thanks_html, n);
+    memcpy(s_resp + h, html, n);
     return (size_t)(h + n);
 }
 
@@ -338,7 +425,10 @@ static void handle_request(struct tcp_pcb *pcb, conn_t *c)
     if (is_post && strstr(c->req, "/save")) {
         save_form(body);
         c->reboot_after = true;
-        send_response(pcb, c, build_thanks());
+        send_response(pcb, c, build_static(k_thanks_html));
+    } else if (strstr(c->req, "GET /rescan")) {
+        s_rescan_pending = true;
+        send_response(pcb, c, build_static(k_scanning_html));
     } else {
         send_response(pcb, c, build_form());
     }
@@ -435,9 +525,19 @@ void portal_run(void)
     }
     cyw43_arch_lwip_end();
 
-    /* Service the portal (threadsafe-background runs lwIP for us) until the
-     * user submits the form, then reboot to apply. */
+    /* Initial scan (while the AP is up, so the client never drops) to pre-fill
+     * the picker. Best-effort: the form still works by typing the SSID. */
+    wifi_scan();
+
+    /* Service the portal (threadsafe-background runs lwIP for us) until the user
+     * submits the form. A Rescan link sets s_rescan_pending, which we service
+     * here in the main loop (never in an lwIP callback, since the scan blocks). */
     while (!s_reboot_pending) {
+        if (s_rescan_pending) {
+            s_rescan_pending = false;
+            printf("portal: rescan requested\n");
+            wifi_scan();
+        }
         sleep_ms(50);
     }
     printf("portal: settings saved, rebooting\n");
