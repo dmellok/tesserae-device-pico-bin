@@ -35,8 +35,15 @@ static char s_topic_status[96];
 static volatile int    s_cur;            /* 1=frame, 2=config, 0=other, while receiving */
 static char            s_payload[PAYLOAD_MAX];
 static volatile size_t s_payload_len;
-static volatile int    s_msg_topic;      /* set when a full message is ready */
-static volatile bool   s_msg_ready;
+
+/* Completed messages are copied into per-topic buffers the instant the last
+ * fragment lands, so the two retained messages (frame + config) that the
+ * broker delivers back-to-back after subscribe cannot clobber each other
+ * before the polling loop reads them. */
+static char            s_frame_buf[PAYLOAD_MAX];
+static volatile bool   s_frame_ready;
+static char            s_config_buf[PAYLOAD_MAX];
+static volatile bool   s_config_ready;
 
 static volatile bool  s_pub_done;
 static volatile err_t s_pub_err;
@@ -146,8 +153,13 @@ static void indata_cb(void *arg, const u8_t *data, u16_t len, u8_t flags)
     }
     if (flags & MQTT_DATA_FLAG_LAST) {
         s_payload[s_payload_len] = '\0';
-        s_msg_topic = s_cur;
-        s_msg_ready = true;
+        if (s_cur == 1) {
+            memcpy(s_frame_buf, s_payload, s_payload_len + 1);
+            s_frame_ready = true;
+        } else if (s_cur == 2) {
+            memcpy(s_config_buf, s_payload, s_payload_len + 1);
+            s_config_ready = true;
+        }
     }
 }
 
@@ -226,33 +238,38 @@ bool mqtt_fetch_retained(const char *uri, const char *device_id,
     build_topics(device_id);
     if (!connect_broker(uri, user, pass, timeout_ms)) return false;
 
-    s_msg_ready = false;
+    s_frame_ready = false;
+    s_config_ready = false;
     cyw43_arch_lwip_begin();
     mqtt_subscribe(s_client, s_topic_frame, 1, sub_cb, NULL);
     mqtt_subscribe(s_client, s_topic_config, 1, sub_cb, NULL);
     cyw43_arch_lwip_end();
 
     bool got_url = false;
+    bool got_config = false;
     uint32_t t = 0;
     uint32_t grace = 0;   /* once we have the URL, linger briefly for config */
     while (t < timeout_ms) {
-        if (s_msg_ready) {
-            int topic = s_msg_topic;
-            s_msg_ready = false;
-            if (topic == 1) {
-                if (extract_url(s_payload, url_out, url_cap)) {
-                    printf("mqtt: frame url = %s\n", url_out);
-                    got_url = true;
-                }
-            } else if (topic == 2) {
-                int32_t s;
-                if (sleep_out && extract_int(s_payload, "sleep_interval_s", &s)) {
-                    *sleep_out = s;
-                    printf("mqtt: config sleep_interval_s = %ld\n", (long)s);
-                }
+        if (s_frame_ready) {
+            s_frame_ready = false;
+            if (extract_url(s_frame_buf, url_out, url_cap)) {
+                printf("mqtt: frame url = %s\n", url_out);
+                got_url = true;
             }
         }
-        if (got_url) { grace += 10; if (grace >= 300) break; }
+        if (s_config_ready) {
+            s_config_ready = false;
+            int32_t s;
+            if (sleep_out && extract_int(s_config_buf, "sleep_interval_s", &s)) {
+                *sleep_out = s;
+                printf("mqtt: config sleep_interval_s = %ld\n", (long)s);
+            }
+            got_config = true;
+        }
+        /* Stop once we have the frame URL and either saw config or lingered a
+         * short grace for it. Keeps a fast wake when both retained messages are
+         * already waiting, without giving up before they arrive. */
+        if (got_url && (got_config || (grace += 10) >= 500)) break;
         sleep_ms(10);
         t += 10;
     }
