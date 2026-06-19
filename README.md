@@ -196,14 +196,14 @@ Expected output:
 ```
 tesserae-device-pico-bin
 psram: 8388608 bytes detected; self-test PASS
-config: wifi_ssid='turtle' device_id='pico_lounge' sleep_s=900 last_hash=set
+config: wifi_ssid='my-wifi' device_id='pico' sleep_s=900 last_hash=set
 eeprom: 1600x1200 variant=21 (Spectra 6 13.3 1600 x 1200 (EL133UF1))
 panel: EL133UF1 13.3in Spectra 6 (1200x1600)
 wake: timer (boot #42)
-wifi: connected, ip=192.168.50.66 rssi=-54
-mdns: advertising tesserae-pico-30b3.local
+wifi: connected, ip=192.168.1.42 rssi=-54
+mdns: advertising tesserae-pico-xxxx.local
 sntp: epoch=1781852034
-mqtt: frame url = http://192.168.50.125:8765/renders/<hash>.bin
+mqtt: frame url = http://192.168.1.50:8765/renders/<hash>.bin
 frame: unchanged (hash match); skipping refresh
 mqtt: status published (243 bytes)
 paint: skipped (unchanged)
