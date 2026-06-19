@@ -22,6 +22,7 @@
 
 #include "dhcpserver.h"
 #include "dnsserver.h"
+#include "net_mdns.h"
 #include "config.h"
 
 /* ---------- page markup (verbatim from tesserae-device-esp32-bin) ---------- */
@@ -513,6 +514,7 @@ void portal_run(void)
     static dns_server_t  dns;
     dhcp_server_init(&dhcp, &gw, &mask);
     dns_server_init(&dns, &gw);
+    mdns_advertise();   /* also reachable at tesserae-pico-XXXX.local on the AP */
 
     cyw43_arch_lwip_begin();
     struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);

@@ -46,6 +46,12 @@
 #define LWIP_DHCP_DOES_ACD_CHECK    0
 #define LWIP_IGMP                   1   /* needed for mDNS multicast */
 #define SO_REUSE                    1
+
+/* mDNS responder: advertise tesserae-pico-XXXX.local while connected. */
+#define LWIP_MDNS_RESPONDER         1
+#define LWIP_NUM_NETIF_CLIENT_DATA  2   /* mDNS stores per-netif state here   */
+#define MDNS_MAX_SERVICES           1
+#define MEMP_NUM_UDP_PCB            8   /* DHCP + DNS + SNTP + mDNS + headroom */
 #define LWIP_ALTCP                  1   /* lwIP HTTP client is built on altcp */
 #define LWIP_ALTCP_TLS              0   /* HTTP only for now, no TLS */
 

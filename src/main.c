@@ -24,6 +24,7 @@
 #include "net_http.h"
 #include "net_sntp.h"
 #include "net_portal.h"
+#include "net_mdns.h"
 #include "config.h"
 #include "psram.h"
 #include "sleepmgr.h"
@@ -64,6 +65,7 @@ static void do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
     char           new_hash[65] = {0};
 
     if (config_has_wifi() && wifi_connect(c->wifi_ssid, c->wifi_pass, 20000)) {
+        mdns_advertise();  /* discoverable as tesserae-pico-XXXX.local while awake */
         sntp_sync(8000);   /* best-effort; never blocks the cycle */
 
         if (c->mqtt_uri[0] != '\0') {
