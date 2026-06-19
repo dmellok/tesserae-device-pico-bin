@@ -18,10 +18,16 @@ typedef enum {
     WAKE_TIMER = 1,   /* woke from a POWMAN alarm after sleep_deep_ms()   */
 } wake_reason_t;
 
-/* Start the always-on POWMAN timer if it is not already running. Idempotent:
- * after a timer wake the timer is still running and keeps the wall-clock, so
- * this leaves it untouched. */
+/* Start the always-on POWMAN timer and apply the 1 kHz LPOSC tick source
+ * (using the calibrated LPOSC frequency if sleep_calibrate_lposc() has run). */
 void sleep_timer_init(void);
+
+/* Measure the LPOSC frequency against the accurate system timer and store it
+ * so the POWMAN tick divider produces a true 1 kHz (the LPOSC is untrimmed and
+ * runs well off its 32.768 kHz nominal, ~14% here). One 1-second measurement
+ * per power session: it self-skips on timer-wake boots (the calibration is kept
+ * in an always-on scratch register), so only a cold boot pays the cost. */
+void sleep_calibrate_lposc(void);
 
 /* Why this boot happened. Latches on first call (and records the boot count). */
 wake_reason_t sleep_wake_reason(void);

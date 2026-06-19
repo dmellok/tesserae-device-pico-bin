@@ -260,6 +260,7 @@ int main(void)
     /* Phase 5: report why we woke (cold boot vs POWMAN timer wake) and start
      * the always-on wall-clock timer (it survives deep sleep once SNTP sets it). */
     sleep_timer_init();
+    sleep_calibrate_lposc();   /* one-time LPOSC trim (cold boot only) for accurate sleep */
     wake_reason_t wake = sleep_wake_reason();
     printf("wake: %s (boot #%u)\n",
            wake == WAKE_TIMER ? "timer" : "cold", (unsigned)sleep_boot_count());

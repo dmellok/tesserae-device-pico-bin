@@ -38,20 +38,50 @@ static inline uint32_t scratch_get16(int i)
     return powman_hw->scratch[i] & 0xFFFFu;
 }
 
+/* scratch[2] low-16: calibrated LPOSC frequency in Hz (0 = not yet measured). */
+#define LPOSC_NOMINAL_HZ  32768u
+
 void sleep_timer_init(void)
 {
     /* Establish the 1 kHz LPOSC tick source. The SDK's
      * powman_timer_set_1khz_tick_source_lposc() only runs the source switch +
-     * USING_LPOSC handshake (which is what actually applies the /32.768 divider
-     * that turns the ~32 kHz LPOSC into 1 ms ticks) when the timer is already
-     * running. So start the timer first, then assert the source: that guarantees
-     * the divider takes effect on every boot, including a timer-wake boot where
-     * the timer is already running from the always-on domain. Without this the
-     * timer counts raw LPOSC as if it were ms and alarms fire ~33x too early.
-     * The running count is preserved (no set_ms here), so the clock survives. */
+     * USING_LPOSC handshake (which is what actually applies the divider that
+     * turns the LPOSC into 1 ms ticks) when the timer is already running. So
+     * start the timer first, then assert the source: that guarantees the divider
+     * takes effect on every boot, including a timer-wake boot where the timer is
+     * already running from the always-on domain. Without this the timer counts
+     * raw LPOSC as if it were ms and alarms fire ~33x too early. The running
+     * count is preserved (no set_ms here), so the clock survives.
+     *
+     * Use the calibrated LPOSC frequency if we have one (see
+     * sleep_calibrate_lposc); otherwise fall back to the nominal 32.768 kHz. */
     if (!powman_timer_is_running())
         powman_timer_start();
-    powman_timer_set_1khz_tick_source_lposc();
+    uint32_t hz = scratch_get16(2);
+    if (hz >= 16000u && hz <= 50000u)
+        powman_timer_set_1khz_tick_source_lposc_with_hz(hz);
+    else
+        powman_timer_set_1khz_tick_source_lposc();
+}
+
+void sleep_calibrate_lposc(void)
+{
+    if (scratch_get16(2) != 0) return;   /* already calibrated this power session */
+
+    /* Measure ticks over one accurate (system-timer) second at the nominal
+     * divider, derive the true LPOSC frequency, store it, and re-apply. */
+    sleep_timer_init();
+    uint64_t a = powman_timer_get_ms();
+    sleep_ms(1000);
+    uint64_t b = powman_timer_get_ms();
+    uint32_t rate = (uint32_t)(b - a);                 /* ticks/s at nominal divider */
+    if (rate < 400u || rate > 2000u) return;           /* implausible; keep nominal */
+
+    uint32_t hz = (rate * LPOSC_NOMINAL_HZ + 500u) / 1000u;   /* true LPOSC Hz */
+    scratch_put16(2, hz);
+    powman_timer_set_1khz_tick_source_lposc_with_hz(hz);
+    printf("lposc: calibrated to %u Hz (nominal divider gave %u ticks/s)\n",
+           (unsigned)hz, (unsigned)rate);
 }
 
 static void latch(void)
