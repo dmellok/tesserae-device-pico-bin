@@ -52,6 +52,19 @@
 /* extra timeouts headroom for the apps (DHCP/DNS/SNTP/MQTT/mDNS timers) */
 #define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8)
 
+/* SNTP (phase 5): resolve the server by name, and deliver the epoch through an
+ * assignment into net_sntp.c's globals (no cross-file prototype to maintain).
+ * The extern decls live inside the macro so they are only seen where sntp.c
+ * expands it. */
+#define SNTP_SERVER_DNS             1
+#define SNTP_SET_SYSTEM_TIME(sec) \
+    do { \
+        extern volatile unsigned long g_sntp_epoch; \
+        extern volatile int           g_sntp_got; \
+        g_sntp_epoch = (unsigned long)(sec); \
+        g_sntp_got   = 1; \
+    } while (0)
+
 #define LWIP_DEBUG                  0
 
 #endif /* _LWIPOPTS_H */
