@@ -15,6 +15,7 @@
 #include "inky_eeprom.h"
 #include "panels.h"
 #include "net_wifi.h"
+#include "config.h"
 
 #if defined(__has_include)
 #  if __has_include("secrets.h")
@@ -28,16 +29,45 @@ int main(void)
     sleep_ms(2000);   /* let a freshly attached USB serial monitor catch the logs */
     printf("\ntesserae-device-pico-bin\n");
 
-    /* Phase 1 (WIP, building toward ESP32-client parity): if dev WiFi creds are
-     * present in secrets.h, bring up the radio as a connectivity check. With no
-     * secrets.h this is skipped and the firmware behaves as the panel MVP. */
+    /* Phase 2 (WIP, building toward ESP32-client parity): load persistent
+     * config from flash. On first boot (blank flash) seed it from secrets.h if
+     * present, then save. Radio is down here, so the flash write is safe. */
+    bool had_config = config_load();
+    if (!had_config) {
+        printf("config: none saved; initialising\n");
 #ifdef WIFI_SSID
-    if (wifi_connect(WIFI_SSID, WIFI_PASS, 20000)) {
-        wifi_stop();   /* power the radio back down before the slow refresh */
-    }
-#else
-    printf("wifi: no secrets.h creds; skipping (copy include/secrets.example.h)\n");
+        config_set_wifi(WIFI_SSID, WIFI_PASS);
 #endif
+#ifdef MQTT_URI
+        config_set_mqtt(MQTT_URI,
+#  ifdef MQTT_DEVICE_ID
+                        MQTT_DEVICE_ID,
+#  else
+                        NULL,
+#  endif
+#  ifdef MQTT_USER
+                        MQTT_USER, MQTT_PASS
+#  else
+                        NULL, NULL
+#  endif
+        );
+#endif
+        printf(config_save() ? "config: saved (seeded from secrets.h where set)\n"
+                             : "config: SAVE FAILED\n");
+    } else {
+        printf("config: loaded from flash\n");
+    }
+    const config_t *c = config_get();
+    printf("config: wifi_ssid='%s' device_id='%s' sleep_s=%ld last_hash=%s\n",
+           c->wifi_ssid, c->mqtt_device_id[0] ? c->mqtt_device_id : "(default)",
+           (long)c->sleep_s, c->last_hash[0] ? "set" : "(none)");
+
+    /* Connectivity check using stored creds (radio powered back down after). */
+    if (config_has_wifi()) {
+        if (wifi_connect(c->wifi_ssid, c->wifi_pass, 20000)) wifi_stop();
+    } else {
+        printf("wifi: no SSID configured; skipping (portal comes in a later phase)\n");
+    }
 
     /* Identify the panel from the model EEPROM (I2C, separate from the SPI panel
      * bus). The display_variant selects the driver. */
