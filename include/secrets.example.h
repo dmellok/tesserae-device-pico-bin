@@ -27,6 +27,8 @@
  *                    (string literal). Handy before the server publishes a
  *                    retained frame for this device. e.g.
  *                    -DDEV_FRAME_URL=\"http://host:8765/renders/abc.bin\"
+ *   DEV_FORCE_PORTAL force the provisioning portal (setup AP) on boot even when
+ *                    WiFi creds exist, for testing the captive portal.
  * Can also be passed as build flags, e.g.
  *   PLATFORMIO_BUILD_FLAGS="-DDEV_SLEEP_S=0 -DDEV_FORCE_REPAINT" pio run -t upload
  */

@@ -23,6 +23,7 @@
 #include "net_mqtt.h"
 #include "net_http.h"
 #include "net_sntp.h"
+#include "net_portal.h"
 #include "config.h"
 #include "psram.h"
 #include "sleepmgr.h"
@@ -264,6 +265,19 @@ int main(void)
     wake_reason_t wake = sleep_wake_reason();
     printf("wake: %s (boot #%u)\n",
            wake == WAKE_TIMER ? "timer" : "cold", (unsigned)sleep_boot_count());
+
+#ifdef DEV_FORCE_PORTAL
+    printf("dev: forcing provisioning portal\n");
+    portal_run();
+#endif
+
+    /* No WiFi credentials yet: come up as a setup AP and serve the provisioning
+     * portal. Submitting the form saves config and reboots, so this never
+     * returns. (secrets.h, if present, seeds creds and skips this.) */
+    if (!config_has_wifi()) {
+        printf("config: no WiFi credentials; entering provisioning portal\n");
+        portal_run();
+    }
 
     /* Run one cycle, then either deep-sleep until the next refresh or, in dev
      * mode (sleep_s <= 0), stay awake and loop so the serial monitor survives
