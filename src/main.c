@@ -14,12 +14,30 @@
 
 #include "inky_eeprom.h"
 #include "panels.h"
+#include "net_wifi.h"
+
+#if defined(__has_include)
+#  if __has_include("secrets.h")
+#    include "secrets.h"
+#  endif
+#endif
 
 int main(void)
 {
     stdio_init_all();
     sleep_ms(2000);   /* let a freshly attached USB serial monitor catch the logs */
     printf("\ntesserae-device-pico-bin\n");
+
+    /* Phase 1 (WIP, building toward ESP32-client parity): if dev WiFi creds are
+     * present in secrets.h, bring up the radio as a connectivity check. With no
+     * secrets.h this is skipped and the firmware behaves as the panel MVP. */
+#ifdef WIFI_SSID
+    if (wifi_connect(WIFI_SSID, WIFI_PASS, 20000)) {
+        wifi_stop();   /* power the radio back down before the slow refresh */
+    }
+#else
+    printf("wifi: no secrets.h creds; skipping (copy include/secrets.example.h)\n");
+#endif
 
     /* Identify the panel from the model EEPROM (I2C, separate from the SPI panel
      * bus). The display_variant selects the driver. */

@@ -89,8 +89,9 @@ None of these collide with the RM2 wireless module (GP23/24/25/29), so WiFi
 remains available for later. The Inky has no software power-enable line, so
 there is no power pin; it takes 3V3 and GND from the Pico.
 
-All pin numbers live in [`include/epd_config.h`](include/epd_config.h). If you
-use a different adapter or board, that is the only file to change.
+Transport pins live in [`include/epd_io.h`](include/epd_io.h) and the per-panel
+chip-selects in [`src/panels.c`](src/panels.c). If you use a different adapter or
+board, those are the only places to change pins.
 
 ## Gotchas worth knowing
 
@@ -134,7 +135,7 @@ pio run
 
 The first build downloads the toolchain and the Pico SDK and takes a few
 minutes; later builds take a few seconds. The output is
-`.pio/build/pimoroni_pico_plus_2/firmware.uf2`.
+`.pio/build/pimoroni_pico_plus_2w/firmware.uf2`.
 
 ## Flash
 
@@ -145,7 +146,7 @@ The drag-and-drop UF2 route is the most reliable:
 2. Copy the UF2 onto it:
 
    ```sh
-   cp .pio/build/pimoroni_pico_plus_2/firmware.uf2 /Volumes/RP2350/
+   cp .pio/build/pimoroni_pico_plus_2w/firmware.uf2 /Volumes/RP2350/
    ```
 
    The board reboots and runs as soon as the copy finishes.
