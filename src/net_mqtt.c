@@ -276,7 +276,7 @@ bool mqtt_publish_status(const char *uri, const char *device_id,
 
     bool ok = false;
     if (e == ERR_OK && wait_flag(&s_pub_done, timeout_ms) && s_pub_err == ERR_OK) {
-        printf("mqtt: status published (%zu bytes)\n", strlen(json));
+        printf("mqtt: status published (%u bytes)\n", (unsigned)strlen(json));
         ok = true;
     } else {
         printf("mqtt: status publish failed (call=%d, ack=%d)\n", (int)e, (int)s_pub_err);
