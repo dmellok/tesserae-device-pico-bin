@@ -13,7 +13,14 @@
 #define WIFI_SSID   "your-network"
 #define WIFI_PASS   "your-password"
 
-/* MQTT broker and identity. */
+/* Tesserae server (REST transport, recommended). Defining SERVER_URL selects the
+ * REST API over MQTT. Leave PAIRING_CODE unset to auto-register (approve the
+ * device in Tesserae -> Settings -> Devices); set it only for strict admin-gated
+ * pairing. No trailing slash. */
+//#define SERVER_URL      "http://tesserae.local:8765"
+//#define PAIRING_CODE    "123456"
+
+/* MQTT broker and identity (legacy; only used when SERVER_URL is not set). */
 //#define MQTT_URI        "mqtt://homeassistant.local:1883"
 //#define MQTT_DEVICE_ID  "pico"
 //#define MQTT_USER       ""

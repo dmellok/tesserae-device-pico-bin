@@ -519,6 +519,12 @@ int main(void)
 #  endif
     );
 #endif
+#ifdef SERVER_URL
+    config_set_server(SERVER_URL);   /* selects the REST transport over MQTT */
+#  ifdef PAIRING_CODE
+    config_set_pairing_code(PAIRING_CODE);   /* optional; blank = discover/claim */
+#  endif
+#endif
     bool changed = !had_config ||
                    memcmp(&before, config_get(), sizeof(config_t)) != 0;
     if (changed) {
