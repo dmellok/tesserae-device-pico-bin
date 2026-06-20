@@ -30,6 +30,7 @@ typedef enum {
 
 typedef struct {
     char     token[256];        /* device_token to persist */
+    char     device_id[33];     /* canonical id the server matched us to (MAC) */
     int32_t  sleep_interval_s;  /* from config object, -1 if absent */
     uint32_t server_time;       /* unix seconds, 0 if absent */
     int      retry_after_s;     /* set on REST_RATELIMIT */
@@ -38,6 +39,7 @@ typedef struct {
 typedef struct {
     bool     registered;        /* admin clicked Register: token is present */
     char     token[256];        /* device_token, when registered */
+    char     device_id[33];     /* canonical id the server matched us to (MAC) */
     int32_t  sleep_interval_s;  /* from config object, -1 if absent */
     uint32_t server_time;       /* unix seconds, 0 if absent */
     int      retry_after_s;     /* how long to wait before the next discover */

@@ -117,6 +117,11 @@ void config_set_server(const char *url)
     set_str(s_cfg.server_url, sizeof s_cfg.server_url, url);
 }
 
+void config_set_device_id(const char *id)
+{
+    set_str(s_cfg.mqtt_device_id, sizeof s_cfg.mqtt_device_id, id);
+}
+
 void config_set_device_token(const char *token)
 {
     set_str(s_cfg.device_token, sizeof s_cfg.device_token, token);

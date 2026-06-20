@@ -55,6 +55,11 @@ void config_set_last_hash(const char *hex);
 
 /* REST transport mutators (v2). Same NULL/empty semantics as above. */
 void config_set_server(const char *url);
+
+/* Set the device id (shared by config_device_id() and the MQTT topics). The REST
+ * client calls this to adopt the canonical id the server returns from discover/
+ * register, so frame/status URLs match the token. */
+void config_set_device_id(const char *id);
 void config_set_device_token(const char *token);
 void config_set_pairing_code(const char *code);
 void config_set_frame_etag(const char *etag);
