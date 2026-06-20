@@ -39,6 +39,14 @@
 #define MAX_CONNECT_FAILS  3
 #endif
 
+/* Optional startup delay so a serial monitor attached right after reset/wake can
+ * catch the boot logs. It is wasted awake time on every (battery) wake, so the
+ * default is 0; set DEV_BOOT_LOG_DELAY_MS (e.g. 2000) in secrets.h for on-bench
+ * debugging. */
+#ifndef DEV_BOOT_LOG_DELAY_MS
+#define DEV_BOOT_LOG_DELAY_MS  0
+#endif
+
 #define DEV_LOOP_INTERVAL_MS  60000   /* re-check for a new frame this often in dev mode */
 
 #if defined(__has_include)
@@ -471,7 +479,7 @@ static void run_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
 int main(void)
 {
     stdio_init_all();
-    sleep_ms(2000);   /* let a freshly attached USB serial monitor catch the logs */
+    if (DEV_BOOT_LOG_DELAY_MS) sleep_ms(DEV_BOOT_LOG_DELAY_MS);   /* dev-only; 0 in prod */
     printf("\ntesserae-device-pico-bin\n");
 
     /* Phase 4a (WIP): bring up PSRAM (needed only for frames too big for SRAM,

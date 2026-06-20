@@ -37,3 +37,7 @@
 
 /* Force the provisioning portal (setup AP) on boot even when creds exist. */
 //#define DEV_FORCE_PORTAL   1
+
+/* Startup delay (ms) so a serial monitor can catch the boot logs. Default 0
+ * (production: no wasted awake time on each wake); set ~2000 for bench debugging. */
+//#define DEV_BOOT_LOG_DELAY_MS  2000
