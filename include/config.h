@@ -25,6 +25,12 @@ typedef struct {
     char    mqtt_pass[64];
     char    last_hash[65];     /* 64 hex chars of the last painted URL's SHA-256 */
     int32_t sleep_s;           /* deep-sleep interval, seconds */
+    /* REST transport (v2). When server_url is set the device uses the Tesserae
+     * REST API instead of MQTT (see net_rest.h). */
+    char    server_url[160];        /* e.g. http://tesserae.local:8765 */
+    char    device_token[256];      /* bearer token, set after /device/register */
+    char    pairing_code[16];       /* set pre-register, cleared on success */
+    char    last_frame_etag[80];    /* cached across wakes for If-None-Match */
 } config_t;
 
 /* Load config from flash into the in-RAM copy. Returns true if a valid saved
@@ -47,5 +53,18 @@ void config_set_mqtt(const char *uri, const char *device_id,
 void config_set_sleep_s(int32_t s);
 void config_set_last_hash(const char *hex);
 
+/* REST transport mutators (v2). Same NULL/empty semantics as above. */
+void config_set_server(const char *url);
+void config_set_device_token(const char *token);
+void config_set_pairing_code(const char *code);
+void config_set_frame_etag(const char *etag);
+
 /* Convenience: true if a WiFi SSID is configured. */
 bool config_has_wifi(void);
+
+/* True if a REST server URL is configured (selects REST over MQTT). */
+bool config_has_server(void);
+
+/* Effective device id: the configured mqtt_device_id if set, otherwise a stable
+ * default "pico_" + hex(unique board id). Cached; never NULL. */
+const char *config_device_id(void);

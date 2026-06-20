@@ -35,6 +35,13 @@ wake_reason_t sleep_wake_reason(void);
 /* Boots since the last cold start (1 on a cold boot). */
 uint32_t sleep_boot_count(void);
 
+/* Consecutive-connectivity-failure counter, kept in an always-on scratch word so
+ * it survives the deep-sleep reboots between cycles (reset on a cold boot). Used
+ * to re-open the setup portal after repeated failures to reach WiFi/the server. */
+uint32_t sleep_failcount(void);
+void     sleep_failcount_inc(void);
+void     sleep_failcount_reset(void);
+
 /* Set the wall-clock from an epoch (seconds). Called by the SNTP layer. */
 void sleep_set_epoch(uint32_t sec);
 

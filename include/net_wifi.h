@@ -21,6 +21,9 @@ void wifi_get_ip(char *out, size_t n);
 /* Current AP RSSI in dBm (0 if unavailable). */
 int wifi_rssi(void);
 
+/* Station MAC as "aa:bb:cc:dd:ee:ff". out must be >= 18 bytes. */
+void wifi_get_mac(char *out, size_t n);
+
 /* Power down the radio (the big pre-paint power saving). A later wifi_connect()
  * re-initialises it. */
 void wifi_stop(void);

@@ -101,6 +101,11 @@ static void latch(void)
 wake_reason_t sleep_wake_reason(void) { latch(); return s_reason; }
 uint32_t      sleep_boot_count(void)  { latch(); return s_boot;   }
 
+/* scratch[3] low-16: consecutive connectivity failures (survives deep sleep). */
+uint32_t sleep_failcount(void)      { return scratch_get16(3); }
+void     sleep_failcount_inc(void)  { scratch_put16(3, scratch_get16(3) + 1); }
+void     sleep_failcount_reset(void){ scratch_put16(3, 0); }
+
 void sleep_set_epoch(uint32_t sec)
 {
     sleep_timer_init();
