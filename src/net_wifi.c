@@ -23,19 +23,27 @@ bool wifi_connect(const char *ssid, const char *pass, uint32_t timeout_ms)
 
     bool have_pass = (pass != NULL && pass[0] != '\0');
     uint32_t auth = have_pass ? CYW43_AUTH_WPA2_AES_PSK : CYW43_AUTH_OPEN;
-    printf("wifi: connecting to '%s'...\n", ssid);
 
-    int r = cyw43_arch_wifi_connect_timeout_ms(ssid, have_pass ? pass : NULL,
-                                               auth, timeout_ms);
-    if (r != 0) {
-        printf("wifi: connect failed (%d)\n", r);
-        return false;
+    /* Retry the join: the CYW43 intermittently returns -8 (link fail) on the
+     * first attempt after a fresh init, especially with the deinit/reinit we do
+     * each wake. A couple of quick retries turns those transient misses into a
+     * connect instead of a skipped (and eventually portal-triggering) cycle. */
+    const int attempts = 3;
+    for (int a = 1; a <= attempts; a++) {
+        printf("wifi: connecting to '%s' (attempt %d/%d)...\n", ssid, a, attempts);
+        int r = cyw43_arch_wifi_connect_timeout_ms(ssid, have_pass ? pass : NULL,
+                                                   auth, timeout_ms);
+        if (r == 0) {
+            char ip[16];
+            wifi_get_ip(ip, sizeof ip);
+            printf("wifi: connected, ip=%s rssi=%d\n", ip, wifi_rssi());
+            return true;
+        }
+        printf("wifi: connect failed (%d)%s\n", r,
+               a < attempts ? "; retrying" : "");
+        if (a < attempts) sleep_ms(1000);
     }
-
-    char ip[16];
-    wifi_get_ip(ip, sizeof ip);
-    printf("wifi: connected, ip=%s rssi=%d\n", ip, wifi_rssi());
-    return true;
+    return false;
 }
 
 void wifi_get_ip(char *out, size_t n)
@@ -49,6 +57,14 @@ int wifi_rssi(void)
     int32_t rssi = 0;
     if (cyw43_wifi_get_rssi(&cyw43_state, &rssi) != 0) return 0;
     return (int)rssi;
+}
+
+void wifi_get_mac(char *out, size_t n)
+{
+    uint8_t mac[6] = {0};
+    cyw43_wifi_get_mac(&cyw43_state, CYW43_ITF_STA, mac);
+    snprintf(out, n, "%02x:%02x:%02x:%02x:%02x:%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 void wifi_stop(void)

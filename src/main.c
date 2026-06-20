@@ -21,6 +21,7 @@
 #include "panels.h"
 #include "net_wifi.h"
 #include "net_mqtt.h"
+#include "net_rest.h"
 #include "net_http.h"
 #include "net_sntp.h"
 #include "net_portal.h"
@@ -28,6 +29,15 @@
 #include "config.h"
 #include "psram.h"
 #include "sleepmgr.h"
+
+#define FW_VERSION  "0.2.0"
+
+/* Consecutive cycles that fail to reach WiFi/the server before the firmware
+ * re-opens the setup portal (so a wrong WiFi password or server URL can be fixed
+ * without a reflash). At ~1 cycle/minute this is a few minutes of retries. */
+#ifndef MAX_CONNECT_FAILS
+#define MAX_CONNECT_FAILS  3
+#endif
 
 #define DEV_LOOP_INTERVAL_MS  60000   /* re-check for a new frame this often in dev mode */
 
@@ -55,7 +65,7 @@ static void sha256_hex(const char *s, char out[65])
  * status, drop the radio, then paint. Painting happens with the radio down so
  * the slow refresh and the post-paint flash write are safe.
  */
-static void do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
+static bool do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
 {
     const config_t *c = config_get();
     const uint8_t *frame      = NULL;   /* what we'll paint; NULL -> stripe test pattern */
@@ -64,7 +74,8 @@ static void do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
     bool           cfg_dirty  = false;
     char           new_hash[65] = {0};
 
-    if (config_has_wifi() && wifi_connect(c->wifi_ssid, c->wifi_pass, 20000)) {
+    bool wifi_ok = config_has_wifi() && wifi_connect(c->wifi_ssid, c->wifi_pass, 20000);
+    if (wifi_ok) {
         mdns_advertise();  /* discoverable as tesserae-pico-XXXX.local while awake */
         sntp_sync(8000);   /* best-effort; never blocks the cycle */
 
@@ -130,11 +141,12 @@ static void do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
         const char  *wreason  = (sleep_wake_reason() == WAKE_TIMER) ? "timer" : "poweron";
         char status[320];
         int n = snprintf(status, sizeof status,
-                 "{\"fw_version\":\"0.1.0-pico\",\"kind\":\"pico_bin_client\","
+                 "{\"fw_version\":\"%s\",\"kind\":\"pico_bin_client\","
                  "\"battery_mv\":0,\"battery_pct\":0,"
                  "\"rssi\":%d,\"ip\":\"%s\",\"panel_w\":%u,\"panel_h\":%u,"
                  "\"sleep_interval_s\":%ld,\"next_sleep_s\":%ld,"
                  "\"wake_reason\":\"%s\",\"boot\":%u",
+                 FW_VERSION,
                  wifi_rssi(), ip, panel ? panel->width : 0, panel ? panel->height : 0,
                  (long)interval, (long)interval, wreason, (unsigned)sleep_boot_count());
         if (n > 0 && (size_t)n < sizeof status) {
@@ -181,6 +193,264 @@ static void do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
         printf(config_save() ? "config: saved\n" : "config: SAVE FAILED\n");
     }
     if (sram_buf != NULL) free(sram_buf);
+    return wifi_ok;   /* connectivity reached this cycle (for the portal fallback) */
+}
+
+/* Resolve a (possibly relative) frame URL against the server origin. */
+static void resolve_url(const char *server, const char *u, char *out, size_t cap)
+{
+    if (strncmp(u, "http://", 7) == 0 || strncmp(u, "https://", 8) == 0) {
+        snprintf(out, cap, "%s", u);
+        return;
+    }
+    char origin[200];
+    snprintf(origin, sizeof origin, "%s", server);
+    char *p = strstr(origin, "://");
+    p = p ? p + 3 : origin;
+    char *sl = strchr(p, '/');
+    if (sl) *sl = '\0';                      /* drop any path on the server_url */
+    snprintf(out, cap, "%s%s%s", origin, (u[0] == '/') ? "" : "/", u);
+}
+
+/*
+ * First-boot bootstrap for the REST transport. Returns true once a device token
+ * is in hand (continue the cycle); false means "no token yet" and a backoff has
+ * been written to config.sleep_s for the caller to sleep on. Default is the
+ * zero-touch discover/claim flow (admin clicks Register in Tesserae, no typing
+ * on the device); a stored pairing code opts into strict admin-gated register.
+ */
+static bool rest_bootstrap(uint16_t pw, uint16_t ph, const char *mac,
+                           bool *dirty, bool *reached)
+{
+    const config_t *c = config_get();
+    if (c->device_token[0] != '\0') return true;   /* already bootstrapped */
+
+    if (c->pairing_code[0] != '\0') {
+        rest_register_out_t ro;
+        rest_status_t rs = rest_register(pw, ph, mac, FW_VERSION, &ro, 10000);
+        *reached = (rs != REST_NET_ERR);
+        if (rs == REST_OK) {
+            config_set_device_token(ro.token);
+            config_set_pairing_code("");            /* one-shot; clear on success */
+            if (ro.sleep_interval_s > 0) config_set_sleep_s(ro.sleep_interval_s);
+            if (ro.server_time) sleep_set_epoch(ro.server_time);
+            *dirty = true;
+            printf("rest: registered via pairing code; token stored\n");
+            return true;
+        }
+        int32_t backoff = (c->sleep_s > 0) ? c->sleep_s : 900;
+        if (rs == REST_UNAUTH || rs == REST_FORBIDDEN) {
+            backoff = 3600;
+            printf("rest: register rejected (%d); sleeping 1h to re-pair\n", rs);
+        } else if (rs == REST_RATELIMIT) {
+            backoff = (ro.retry_after_s > 0) ? ro.retry_after_s : 3600;
+            printf("rest: register rate-limited; backoff %lds\n", (long)backoff);
+        } else {
+            printf("rest: register failed (%d); retry next cycle\n", rs);
+        }
+        config_set_sleep_s(backoff);
+        return false;
+    }
+
+    /* Zero-touch: announce via discover and claim the token once the admin
+     * clicks Register. Retried every wake, by design (no caching). */
+    rest_discover_out_t dd;
+    rest_status_t ds = rest_discover(pw, ph, mac, FW_VERSION, &dd, 10000);
+    /* "reached" only on a real discover response (200/429). A wrong URL that
+     * happens to answer with a 4xx/5xx still counts as a failure so the portal
+     * fallback fires, instead of looping on a bad endpoint forever. */
+    *reached = (ds == REST_OK || ds == REST_RATELIMIT);
+    if (ds == REST_OK && dd.registered) {
+        config_set_device_token(dd.token);
+        if (dd.sleep_interval_s > 0) config_set_sleep_s(dd.sleep_interval_s);
+        if (dd.server_time) sleep_set_epoch(dd.server_time);
+        *dirty = true;
+        printf("rest: claimed token via discover; bootstrap complete\n");
+        return true;
+    }
+    int32_t backoff;
+    if (ds == REST_OK) {            /* registered:false, awaiting admin Register */
+        backoff = (dd.retry_after_s > 0) ? dd.retry_after_s : 30;
+        printf("rest: discovered, waiting for admin to Register; retry in %lds\n", (long)backoff);
+    } else if (ds == REST_RATELIMIT) {
+        backoff = (dd.retry_after_s > 0) ? dd.retry_after_s : 60;
+        printf("rest: discover rate-limited; backoff %lds\n", (long)backoff);
+    } else {
+        backoff = 15;   /* unreachable (e.g. wrong server URL): retry soon so the
+                         * connectivity-failure portal fallback kicks in quickly */
+        printf("rest: discover failed (%d); retry in %lds\n", ds, (long)backoff);
+    }
+    config_set_sleep_s(backoff);
+    return false;
+}
+
+/*
+ * One Tesserae cycle over the REST API (used when a server_url is configured).
+ * Bootstrap a token if needed, GET the frame (ETag/304 dedup), download + paint,
+ * POST status, and let next_poll_s drive the deep sleep. Mirrors do_cycle's
+ * "paint with the radio down" ordering. Sleep duration is left in config.sleep_s
+ * for main() to act on; error paths set a backoff there.
+ */
+static bool do_cycle_rest(const panel_t *panel, uint8_t variant, size_t psram_sz)
+{
+    const config_t *c = config_get();
+    uint8_t       *sram_buf  = NULL;
+    const uint8_t *frame     = NULL;
+    bool           skip_paint = false;
+    bool           cfg_dirty  = false;
+    bool           reached    = false;   /* did we reach the server this cycle? */
+    char           new_etag[80] = {0};
+
+    if (!config_has_wifi() || !wifi_connect(c->wifi_ssid, c->wifi_pass, 20000)) {
+        printf("rest: wifi unavailable; skipping cycle\n");
+        return false;   /* main() counts this toward the portal fallback */
+    }
+    mdns_advertise();
+    /* No SNTP on the REST path: the wall clock is set from each response's HTTP
+     * Date header (works on a LAN with no internet, and saves ~8s/cycle). */
+
+    char mac[18];
+    wifi_get_mac(mac, sizeof mac);
+
+    /* Report the panel in its native landscape orientation (the pico_bin
+     * renderer packs 1600x1200 for the 13.3"). */
+    uint16_t pw = panel ? panel->width : 0, ph = panel ? panel->height : 0;
+    if (pw < ph) { uint16_t t = pw; pw = ph; ph = t; }
+
+    /* 1. Bootstrap a device token if we have none (discover/claim by default,
+     * register-with-code when one is stored). Stop and sleep until we have one. */
+    if (c->device_token[0] == '\0') {
+        bool boot_dirty = false;
+        bool got = rest_bootstrap(pw, ph, mac, &boot_dirty, &reached);
+        if (!got) {
+            /* No token yet. The backoff lives in config.sleep_s (RAM) and is
+             * consumed by this boot's sleep, so there is nothing to persist on
+             * the common "waiting for admin" retry: avoid the flash wear. */
+            wifi_stop();
+            return reached;   /* reached==false (server unreachable) feeds the fallback */
+        }
+        if (boot_dirty) cfg_dirty = true;
+        reached = true;
+        c = config_get();
+    }
+
+    /* 2. Frame metadata, with If-None-Match for the ETag/304 dedup. */
+    rest_frame_out_t fo;
+    rest_status_t fs = rest_get_frame(&fo, 10000);
+    if (fs != REST_NET_ERR) reached = true;
+    if (fs == REST_OK) {
+        snprintf(new_etag, sizeof new_etag, "%s", fo.etag);
+        if (panel != NULL) {
+            char fullurl[512];
+            resolve_url(c->server_url, fo.url, fullurl, sizeof fullurl);
+            uint32_t need = panel_frame_bytes(panel);
+            uint8_t *buf = NULL;
+            if (need <= 256u * 1024) buf = sram_buf = malloc(need);
+            if (buf == NULL && psram_sz >= need) buf = (uint8_t *)PSRAM_XIP_BASE;
+            if (buf == NULL) {
+                printf("rest: no buffer for %u bytes (PSRAM board needed?)\n", (unsigned)need);
+            } else {
+                size_t got = 0;
+                if (http_get(fullurl, buf, need, &got, 30000) && got == need) {
+                    frame = buf;
+                } else {
+                    printf("rest: frame fetch failed or wrong size (got %u, want %u)\n",
+                           (unsigned)got, (unsigned)need);
+                }
+            }
+        }
+    } else if (fs == REST_NOT_MODIFIED) {
+        printf("rest: frame unchanged (304); skipping paint\n");
+        skip_paint = true;
+    } else if (fs == REST_NO_CONTENT) {
+        printf("rest: no frame rendered yet (204); skipping paint\n");
+        skip_paint = true;
+    } else if (fs == REST_UNAUTH || fs == REST_FORBIDDEN) {
+        printf("rest: frame auth failed (%d); wiping token to re-register next cycle\n", fs);
+        config_set_device_token("");
+        cfg_dirty = true;
+    } else {
+        printf("rest: frame request failed (%d); keeping last image\n", fs);
+    }
+
+    /* 3. Status heartbeat (only while we still hold a token). */
+    if (config_get()->device_token[0] != '\0') {
+        char ip[16];
+        wifi_get_ip(ip, sizeof ip);
+        int32_t  interval    = config_get()->sleep_s;
+        uint32_t epoch       = sleep_epoch_now();
+        uint32_t sleep_until = (epoch && interval > 0) ? (epoch + interval) : 0;
+        rest_status_out_t so;
+        rest_status_t ss = rest_post_status(wifi_rssi(), ip, pw, ph,
+                                            interval, sleep_until, FW_VERSION, &so, 8000);
+        if (ss != REST_NET_ERR) reached = true;
+        if (ss == REST_OK) {
+            if (so.server_time) sleep_set_epoch(so.server_time);
+            if (so.sleep_interval_s > 0 && so.sleep_interval_s != config_get()->sleep_s) {
+                config_set_sleep_s(so.sleep_interval_s);
+                cfg_dirty = true;
+            }
+            if (so.next_poll_s > 0) config_set_sleep_s(so.next_poll_s);   /* drives this sleep */
+        } else {
+            printf("rest: status post failed (%d)\n", ss);
+            if (ss == REST_UNAUTH || ss == REST_FORBIDDEN) {
+                config_set_device_token(""); cfg_dirty = true;
+            }
+        }
+    }
+
+    wifi_stop();   /* radio down before the slow refresh + flash write */
+
+#ifdef DEV_SLEEP_S
+    config_set_sleep_s(DEV_SLEEP_S);   /* dev override: wins over server next_poll_s */
+#endif
+
+    /* Paint decision (radio down). Keep the current image on a transient miss if
+     * we have ever painted a frame (last_frame_etag set). */
+    if (skip_paint) {
+        printf("paint: skipped (unchanged / none)\n");
+    } else if (panel == NULL) {
+        /* no driver */
+    } else if (frame != NULL) {
+        printf("painting downloaded frame (this takes ~20-45s)...\n");
+        panel->paint(variant, frame);
+        if (new_etag[0]) { config_set_frame_etag(new_etag); cfg_dirty = true; }
+        printf("done.\n");
+    } else if (config_get()->last_frame_etag[0] != '\0') {
+        printf("paint: no frame this cycle; keeping last image\n");
+    } else {
+        printf("painting test stripes (no frame yet; this takes ~20-45s)...\n");
+        panel->paint(variant, NULL);
+        printf("done.\n");
+    }
+
+    if (cfg_dirty) {
+        printf(config_save() ? "config: saved\n" : "config: SAVE FAILED\n");
+    }
+    if (sram_buf != NULL) free(sram_buf);
+    return reached;
+}
+
+/* Run one cycle on the active transport, tracking connectivity. After
+ * MAX_CONNECT_FAILS consecutive failures to reach WiFi/the server, re-open the
+ * setup portal so a bad WiFi password or server URL can be corrected without a
+ * reflash. The failure counter lives in always-on scratch (survives the
+ * deep-sleep reboots between cycles). */
+static void run_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
+{
+    bool reached = config_has_server() ? do_cycle_rest(panel, variant, psram_sz)
+                                       : do_cycle(panel, variant, psram_sz);
+    if (reached) { sleep_failcount_reset(); return; }
+
+    sleep_failcount_inc();
+    uint32_t fails = sleep_failcount();
+    printf("net: connectivity failure %u/%u\n", (unsigned)fails, MAX_CONNECT_FAILS);
+    if (fails >= MAX_CONNECT_FAILS) {
+        printf("net: too many failures; re-opening setup portal\n");
+        sleep_failcount_reset();
+        wifi_stop();                 /* release cyw43 so the portal can re-init it */
+        portal_run(panel, variant);  /* does not return (reboots on save) */
+    }
 }
 
 int main(void)
@@ -267,6 +537,7 @@ int main(void)
     wake_reason_t wake = sleep_wake_reason();
     printf("wake: %s (boot #%u)\n",
            wake == WAKE_TIMER ? "timer" : "cold", (unsigned)sleep_boot_count());
+    if (wake == WAKE_COLD) sleep_failcount_reset();   /* fresh power-on: clear backoff */
 
 #ifdef DEV_FORCE_PORTAL
     printf("dev: forcing provisioning portal\n");
@@ -283,8 +554,10 @@ int main(void)
 
     /* Run one cycle, then either deep-sleep until the next refresh or, in dev
      * mode (sleep_s <= 0), stay awake and loop so the serial monitor survives
-     * and the device can be reflashed. sleep_s may be updated by the cycle. */
-    do_cycle(panel, variant, psram_sz);
+     * and the device can be reflashed. sleep_s may be updated by the cycle.
+     * Transport: REST when a server_url is configured, else the MQTT path.
+     * run_cycle re-opens the portal after repeated connectivity failures. */
+    run_cycle(panel, variant, psram_sz);
 
     int32_t sleep_s = config_get()->sleep_s;
     if (sleep_s > 0) {
@@ -298,6 +571,6 @@ int main(void)
            DEV_LOOP_INTERVAL_MS / 1000);
     while (true) {
         sleep_ms(DEV_LOOP_INTERVAL_MS);
-        do_cycle(panel, variant, psram_sz);
+        run_cycle(panel, variant, psram_sz);
     }
 }

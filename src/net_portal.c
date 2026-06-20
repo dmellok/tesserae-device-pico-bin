@@ -109,12 +109,32 @@ static const char k_form_wifi_fmt[] =
 "</div>"
 "</section>";
 
-/* MQTT card; %s x3 = (mqtt_uri, device_id, mqtt_user) */
-static const char k_form_mqtt_fmt[] =
-"<section class=\"card\"><h2>MQTT broker</h2>"
+/* Tesserae server (REST) card; %s = server_url prefill. Recommended path. */
+static const char k_form_server_fmt[] =
+"<section class=\"card\"><h2>Tesserae server</h2>"
+"<p class=\"hint\">Recommended. Talks to Tesserae over its REST API.</p>"
 "<div class=\"field\">"
-"<label for=\"mqtt_uri\">Broker URI *</label>"
-"<input id=\"mqtt_uri\" name=\"mqtt_uri\" required maxlength=\"159\" "
+"<label for=\"server_url\">Server URL</label>"
+"<input id=\"server_url\" name=\"server_url\" maxlength=\"159\" "
+"autocomplete=\"off\" value=\"%s\" placeholder=\"http://tesserae.local:8765\">"
+"</div>"
+"<div class=\"field\">"
+"<label for=\"pairing_code\">Pairing code (optional)</label>"
+"<input id=\"pairing_code\" name=\"pairing_code\" maxlength=\"15\" "
+"autocomplete=\"off\" inputmode=\"numeric\" placeholder=\"leave blank for auto-register\">"
+"<p class=\"hint\">Leave blank: approve the device in Tesserae &rarr; Settings &rarr; "
+"Devices (Discovered). Enter a code only for strict admin-gated pairing.</p>"
+"</div>"
+"</section>";
+
+/* MQTT card; %s x3 = (mqtt_uri, device_id, mqtt_user). Legacy/optional: leave
+ * the broker URI blank to use the Tesserae server (REST) above instead. */
+static const char k_form_mqtt_fmt[] =
+"<section class=\"card\"><h2>MQTT (legacy, optional)</h2>"
+"<p class=\"hint\">Only if not using the Tesserae server above.</p>"
+"<div class=\"field\">"
+"<label for=\"mqtt_uri\">Broker URI</label>"
+"<input id=\"mqtt_uri\" name=\"mqtt_uri\" maxlength=\"159\" "
 "autocomplete=\"off\" value=\"%s\" placeholder=\"mqtt://192.168.1.50:1883\">"
 "</div>"
 "<div class=\"field\">"
@@ -339,8 +359,9 @@ static void conn_close(struct tcp_pcb *pcb, conn_t *c)
 static size_t build_form(void)
 {
     const config_t *cfg = config_get();
-    char ssid[80], uri[200], devid[80], user[80];
+    char ssid[80], uri[200], devid[80], user[80], server[200];
     html_escape(cfg->wifi_ssid, ssid, sizeof ssid);
+    html_escape(cfg->server_url, server, sizeof server);
     html_escape(cfg->mqtt_uri, uri, sizeof uri);
     html_escape(cfg->mqtt_device_id, devid, sizeof devid);
     html_escape(cfg->mqtt_user, user, sizeof user);
@@ -354,6 +375,7 @@ static size_t build_form(void)
     int n = 0;
     n += snprintf(body + n, sizeof body - n, "%s", k_head);
     n += snprintf(body + n, sizeof body - n, k_form_wifi_fmt, ssid, picker);
+    n += snprintf(body + n, sizeof body - n, k_form_server_fmt, server);
     n += snprintf(body + n, sizeof body - n, k_form_mqtt_fmt, uri, devid, user);
     n += snprintf(body + n, sizeof body - n, "%s", k_tail);
 
@@ -380,21 +402,36 @@ static void save_form(const char *body)
 {
     char ssid[40] = {0}, pass[80] = {0};
     char uri[200] = {0}, devid[40] = {0}, user[72] = {0}, mpass[72] = {0};
+    char surl[200] = {0}, pcode[32] = {0};
     bool has_ssid  = form_field(body, "ssid", ssid, sizeof ssid);
     bool has_pass  = form_field(body, "pass", pass, sizeof pass);
+    bool has_surl  = form_field(body, "server_url", surl, sizeof surl);
+    bool has_pcode = form_field(body, "pairing_code", pcode, sizeof pcode);
     bool has_uri   = form_field(body, "mqtt_uri", uri, sizeof uri);
     bool has_devid = form_field(body, "device_id", devid, sizeof devid);
     bool has_user  = form_field(body, "mqtt_user", user, sizeof user);
     bool has_mpass = form_field(body, "mqtt_pass", mpass, sizeof mpass);
 
-    /* NULL means "leave unchanged"; a blank password keeps the existing one. */
+    /* NULL means "leave unchanged"; a blank password keeps the existing one.
+     * server_url is set verbatim (blank clears it, reverting to MQTT). */
     config_set_wifi(has_ssid ? ssid : NULL,
                     (has_pass && pass[0]) ? pass : NULL);
+    config_set_server(has_surl ? surl : NULL);
     config_set_mqtt(has_uri ? uri : NULL,
                     has_devid ? devid : NULL,
                     has_user ? user : NULL,
                     (has_mpass && mpass[0]) ? mpass : NULL);
-    printf("portal: saving config (ssid='%s' uri='%s' devid='%s')\n", ssid, uri, devid);
+
+    /* A freshly entered pairing code means "(re)pair": store it and force a new
+     * registration by clearing any old token + cached frame ETag. */
+    if (has_pcode && pcode[0]) {
+        config_set_pairing_code(pcode);
+        config_set_device_token("");
+        config_set_frame_etag("");
+    }
+
+    printf("portal: saving config (ssid='%s' server='%s' uri='%s' devid='%s')\n",
+           ssid, surl, uri, devid);
     printf(config_save() ? "portal: config saved\n" : "portal: SAVE FAILED\n");
 }
 

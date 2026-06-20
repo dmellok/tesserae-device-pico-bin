@@ -12,14 +12,15 @@
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
+#include "pico/unique_id.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "hardware/regs/addressmap.h"   /* XIP_BASE */
 
 #define CONFIG_FLASH_OFFSET   (1u * 1024 * 1024)   /* 1 MB into flash */
 #define CONFIG_MAGIC          0x54434647u           /* "TCFG" */
-#define CONFIG_VERSION        1u
-#define DEFAULT_SLEEP_S       900
+#define CONFIG_VERSION        5u                    /* bump to force-wipe stale config -> portal */
+#define DEFAULT_SLEEP_S       60
 
 typedef struct {
     uint32_t magic;
@@ -111,4 +112,42 @@ void config_set_last_hash(const char *hex)
     set_str(s_cfg.last_hash, sizeof s_cfg.last_hash, hex);
 }
 
-bool config_has_wifi(void) { return s_cfg.wifi_ssid[0] != '\0'; }
+void config_set_server(const char *url)
+{
+    set_str(s_cfg.server_url, sizeof s_cfg.server_url, url);
+}
+
+void config_set_device_token(const char *token)
+{
+    set_str(s_cfg.device_token, sizeof s_cfg.device_token, token);
+}
+
+void config_set_pairing_code(const char *code)
+{
+    set_str(s_cfg.pairing_code, sizeof s_cfg.pairing_code, code);
+}
+
+void config_set_frame_etag(const char *etag)
+{
+    set_str(s_cfg.last_frame_etag, sizeof s_cfg.last_frame_etag, etag);
+}
+
+bool config_has_wifi(void)   { return s_cfg.wifi_ssid[0]  != '\0'; }
+bool config_has_server(void) { return s_cfg.server_url[0] != '\0'; }
+
+const char *config_device_id(void)
+{
+    if (s_cfg.mqtt_device_id[0] != '\0') return s_cfg.mqtt_device_id;
+
+    /* Stable default derived from the RP2350 unique board id, computed once. */
+    static char s_devid[6 + 2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
+    if (s_devid[0] == '\0') {
+        pico_unique_board_id_t bid;
+        pico_get_unique_board_id(&bid);
+        int n = snprintf(s_devid, sizeof s_devid, "pico_");
+        for (int i = 0; i < PICO_UNIQUE_BOARD_ID_SIZE_BYTES &&
+                        n < (int)sizeof s_devid - 2; i++)
+            n += snprintf(s_devid + n, sizeof s_devid - n, "%02x", bid.id[i]);
+    }
+    return s_devid;
+}
