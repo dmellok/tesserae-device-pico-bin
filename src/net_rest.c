@@ -393,6 +393,7 @@ rest_status_t rest_discover(uint16_t panel_w, uint16_t panel_h,
     out->retry_after_s = (ra > 0) ? (int)ra : 30;
     if (out->registered) {
         json_get_str(r, "device_token", out->token, sizeof out->token);
+        json_get_str(r, "device_id", out->device_id, sizeof out->device_id);
         cJSON *cfg = cJSON_GetObjectItemCaseSensitive(r, "config");
         if (cfg) out->sleep_interval_s = json_get_int(cfg, "sleep_interval_s", -1);
     }
@@ -428,6 +429,7 @@ rest_status_t rest_register(uint16_t panel_w, uint16_t panel_h,
     cJSON *r = cJSON_Parse(rbody);
     if (!r) return REST_HTTP_ERR;
     json_get_str(r, "device_token", out->token, sizeof out->token);
+    json_get_str(r, "device_id", out->device_id, sizeof out->device_id);
     out->server_time = (uint32_t)json_get_int(r, "server_time", 0);
     cJSON *cfg = cJSON_GetObjectItemCaseSensitive(r, "config");
     if (cfg) out->sleep_interval_s = json_get_int(cfg, "sleep_interval_s", -1);

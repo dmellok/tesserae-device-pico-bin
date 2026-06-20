@@ -231,11 +231,17 @@ static bool rest_bootstrap(uint16_t pw, uint16_t ph, const char *mac,
         *reached = (rs != REST_NET_ERR);
         if (rs == REST_OK) {
             config_set_device_token(ro.token);
+            /* Adopt the server's canonical device id (it matches us by MAC, so it
+             * may differ from our configured id); the token is bound to it, and
+             * frame/status URLs must use it or the server returns 403. */
+            if (ro.device_id[0] && strcmp(ro.device_id, config_device_id()) != 0)
+                config_set_device_id(ro.device_id);
             config_set_pairing_code("");            /* one-shot; clear on success */
             if (ro.sleep_interval_s > 0) config_set_sleep_s(ro.sleep_interval_s);
             if (ro.server_time) sleep_set_epoch(ro.server_time);
             *dirty = true;
-            printf("rest: registered via pairing code; token stored\n");
+            printf("rest: registered via pairing code; token stored (id=%s)\n",
+                   config_device_id());
             return true;
         }
         int32_t backoff = (c->sleep_s > 0) ? c->sleep_s : 900;
@@ -262,10 +268,19 @@ static bool rest_bootstrap(uint16_t pw, uint16_t ph, const char *mac,
     *reached = (ds == REST_OK || ds == REST_RATELIMIT);
     if (ds == REST_OK && dd.registered) {
         config_set_device_token(dd.token);
+        /* Adopt the server's canonical device id (MAC-matched; may differ from
+         * our configured id). The token is bound to it -- frame/status URLs must
+         * use it or the server returns 403 "token not valid for this device". */
+        if (dd.device_id[0] && strcmp(dd.device_id, config_device_id()) != 0) {
+            printf("rest: adopting server device id '%s' (was '%s')\n",
+                   dd.device_id, config_device_id());
+            config_set_device_id(dd.device_id);
+        }
         if (dd.sleep_interval_s > 0) config_set_sleep_s(dd.sleep_interval_s);
         if (dd.server_time) sleep_set_epoch(dd.server_time);
         *dirty = true;
-        printf("rest: claimed token via discover; bootstrap complete\n");
+        printf("rest: claimed token via discover; bootstrap complete (id=%s)\n",
+               config_device_id());
         return true;
     }
     int32_t backoff;
