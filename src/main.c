@@ -29,6 +29,7 @@
 #include "config.h"
 #include "psram.h"
 #include "sleepmgr.h"
+#include "battery.h"
 
 #define FW_VERSION  "0.2.0"
 
@@ -138,10 +139,10 @@ static bool do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
             printf("mqtt: no broker configured (set MQTT_URI in secrets.h)\n");
         }
 
-        /* Heartbeat (full ESP32-client parity). Battery is reported as 0 (this
-         * board has no battery-sense ADC wired). wake_reason uses the server's
-         * vocabulary ("timer"/"poweron"); sleep_until is omitted when the clock
-         * is unsynced so the server falls back to its tolerance window. */
+        /* Heartbeat (full ESP32-client parity). Battery is sampled from VSYS at
+         * cycle start (see battery_sample in run_cycle). wake_reason uses the
+         * server's vocabulary ("timer"/"poweron"); sleep_until is omitted when
+         * the clock is unsynced so the server falls back to its tolerance window. */
         char ip[16];
         wifi_get_ip(ip, sizeof ip);
         int32_t      interval = c->sleep_s;
@@ -150,11 +151,12 @@ static bool do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
         char status[320];
         int n = snprintf(status, sizeof status,
                  "{\"fw_version\":\"%s\",\"kind\":\"pico_bin_client\","
-                 "\"battery_mv\":0,\"battery_pct\":0,"
+                 "\"battery_mv\":%lu,\"battery_pct\":%d,"
                  "\"rssi\":%d,\"ip\":\"%s\",\"panel_w\":%u,\"panel_h\":%u,"
                  "\"sleep_interval_s\":%ld,\"next_sleep_s\":%ld,"
                  "\"wake_reason\":\"%s\",\"boot\":%u",
                  FW_VERSION,
+                 (unsigned long)battery_mv(), battery_pct(),
                  wifi_rssi(), ip, panel ? panel->width : 0, panel ? panel->height : 0,
                  (long)interval, (long)interval, wreason, (unsigned)sleep_boot_count());
         if (n > 0 && (size_t)n < sizeof status) {
@@ -461,6 +463,11 @@ static bool do_cycle_rest(const panel_t *panel, uint8_t variant, size_t psram_sz
  * deep-sleep reboots between cycles). */
 static void run_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
 {
+    /* Sample VSYS now, before either transport brings the radio up (the sense
+     * pin GP43 is shared with the wireless). The heartbeat reads the cache. */
+    battery_sample();
+    printf("battery: %lu mV (~%d%%)\n", (unsigned long)battery_mv(), battery_pct());
+
     bool reached = config_has_server() ? do_cycle_rest(panel, variant, psram_sz)
                                        : do_cycle(panel, variant, psram_sz);
     if (reached) { sleep_failcount_reset(); return; }

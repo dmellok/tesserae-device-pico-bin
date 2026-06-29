@@ -25,6 +25,7 @@
 
 #include "config.h"
 #include "sleepmgr.h"
+#include "battery.h"
 #include "cJSON.h"
 
 #define REST_RX_MAX   4096          /* JSON control responses are small */
@@ -484,8 +485,8 @@ rest_status_t rest_post_status(int rssi, const char *ip,
     snprintf(url, sizeof url, "%s/api/v1/device/%s/status", c->server_url, config_device_id());
 
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddNumberToObject(o, "battery_mv", 0);
-    cJSON_AddNumberToObject(o, "battery_pct", 0);
+    cJSON_AddNumberToObject(o, "battery_mv", battery_mv());
+    cJSON_AddNumberToObject(o, "battery_pct", battery_pct());
     cJSON_AddNumberToObject(o, "rssi", rssi);
     cJSON_AddStringToObject(o, "ip", ip ? ip : "");
     cJSON_AddNumberToObject(o, "next_sleep_s", next_sleep_s);
