@@ -18,6 +18,9 @@
 /* Sample VSYS and cache mV + percentage. Call once per wake, before wifi. */
 void battery_sample(void);
 
+/* Raw 12-bit ADC count from the last sample (for calibration/debug). */
+uint16_t battery_raw(void);
+
 /* Last sampled VSYS in millivolts (0 before the first sample). */
 uint32_t battery_mv(void);
 

@@ -466,7 +466,8 @@ static void run_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
     /* Sample VSYS now, before either transport brings the radio up (the sense
      * pin GP43 is shared with the wireless). The heartbeat reads the cache. */
     battery_sample();
-    printf("battery: %lu mV (~%d%%)\n", (unsigned long)battery_mv(), battery_pct());
+    printf("battery: %lu mV (~%d%%) [raw=%u]\n",
+           (unsigned long)battery_mv(), battery_pct(), battery_raw());
 
     bool reached = config_has_server() ? do_cycle_rest(panel, variant, psram_sz)
                                        : do_cycle(panel, variant, psram_sz);
