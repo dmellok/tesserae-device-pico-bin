@@ -19,7 +19,7 @@
 
 #define CONFIG_FLASH_OFFSET   (1u * 1024 * 1024)   /* 1 MB into flash */
 #define CONFIG_MAGIC          0x54434647u           /* "TCFG" */
-#define CONFIG_VERSION        6u                    /* bump to force-wipe stale config -> portal */
+#define CONFIG_VERSION        7u                    /* bump to force-wipe stale config -> portal */
 #define DEFAULT_SLEEP_S       60
 
 typedef struct {
