@@ -12,6 +12,7 @@
 #include "config.h"
 #include "battery.h"
 #include "sleepmgr.h"
+#include "net_tls.h"
 
 #define RELAY_HTTP_MS   15000   /* TLS handshake + round trip, over the internet */
 #define RELAY_FRAME_MS  60000   /* a ~960 KB sealed frame */
@@ -95,7 +96,11 @@ static int relay_json(const char *url, const char *method, const char *body,
         .timeout_ms = RELAY_HTTP_MS,
     };
     http_resp_t resp;
-    if (!http_request(&req, &resp)) {
+    bool ok = http_request(&req, &resp);
+#ifdef TESSERAE_TLS_DEBUG
+    net_tls_log_stack("after-request");
+#endif
+    if (!ok) {
         printf("relay: %s %s failed (transport)\n", method, url);
         return -1;
     }

@@ -912,6 +912,10 @@ int main(void)
     buttons_init();
     maybe_factory_reset();
 
+#ifdef TESSERAE_TLS_DEBUG
+    net_tls_paint_stack();   /* measure how deep the TLS path actually goes */
+#endif
+
 
     /* Phase 4a (WIP): bring up PSRAM (needed only for frames too big for SRAM,
      * e.g. the 13.3"). Returns 0 on boards without it. The self-test is a

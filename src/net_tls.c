@@ -35,6 +35,41 @@ static bool s_tried;          /* one init attempt per boot, success or not */
 
 extern char __end__;        /* start of the heap (end of .bss) */
 extern char __HeapLimit;    /* ceiling sbrk may grow to */
+extern char __StackBottom;  /* lowest address the stack may reach */
+extern char __StackTop;     /* initial SP */
+
+/* ---- stack high-water measurement ----------------------------------------
+ *
+ * Stack exhaustion does not fail cleanly on this target: it corrupts whatever
+ * sits below the stack and the damage surfaces somewhere unrelated. That makes
+ * "is the stack big enough" a question worth ANSWERING rather than assuming,
+ * which is how a 2 KB default went unnoticed. Paint the unused region with a
+ * pattern, then find the deepest word that got overwritten. */
+#define STACK_PAINT 0xC5C5C5C5u
+
+void net_tls_paint_stack(void)
+{
+    /* Leave a margin above the current frame so this call does not paint over
+     * its own locals or the return address it needs. */
+    volatile uint32_t here;
+    uint32_t *sp = (uint32_t *)((uintptr_t)&here & ~3u);
+    for (uint32_t *p = (uint32_t *)&__StackBottom; p < sp - 64; p++)
+        *p = STACK_PAINT;
+}
+
+void net_tls_log_stack(const char *when)
+{
+    const uint32_t *bottom = (const uint32_t *)&__StackBottom;
+    const uint32_t *top    = (const uint32_t *)&__StackTop;
+    const uint32_t *p      = bottom;
+    while (p < top && *p == STACK_PAINT) p++;
+
+    size_t total = (size_t)((const char *)top - (const char *)bottom);
+    size_t used  = (size_t)((const char *)top - (const char *)p);
+    printf("stack[%s]: %u of %u bytes used, %u free%s\n", when,
+           (unsigned)used, (unsigned)total, (unsigned)(total - used),
+           (p == bottom) ? "  *** EXHAUSTED ***" : "");
+}
 
 void net_tls_log_heap(const char *when)
 {
@@ -173,6 +208,68 @@ void net_tls_selftest(void)
         }
         mbedtls_x509_crt_free(&crt);
     }
+
+    /* Now the shape the HANDSHAKE uses: all three appended into ONE chain, in
+     * order, exactly as ssl_parse_certificate() does. This is the only
+     * structural difference left between the parse that works here and the one
+     * that fails during the handshake -- appending walks the existing list and
+     * allocates a new link each time, where the per-cert test above always
+     * starts from a freshly initialised context. */
+    mbedtls_x509_crt chain;
+    mbedtls_x509_crt_init(&chain);
+    for (int i = 0; i < 3; i++) {
+        int rc = mbedtls_x509_crt_parse_der(&chain, k_selftest_certs[i],
+                                            k_selftest_cert_lens[i]);
+        if (rc != 0) {
+            char buf[128];
+            mbedtls_strerror(rc, buf, sizeof buf);
+            printf("selftest: CHAIN append %d FAILED rc=%d (-0x%04X) %s\n",
+                   i, rc, (unsigned)(-rc), buf);
+            break;
+        }
+        printf("selftest: chain append %d OK\n", i);
+    }
+
+    /* Reproduce the handshake's exact memory layout: mbedTLS parses at
+     * ssl->in_msg + 10 (4-byte handshake header, 3-byte cert-list length,
+     * 3-byte cert length), which is 2 mod 4 -- UNALIGNED. Every parse above
+     * used a compiler-aligned array, so this is the last untested difference
+     * between the call that works and the call that fails. */
+    for (int off = 0; off <= 10; off += 2) {
+        static uint8_t staged[1024];
+        if ((size_t)off + k_selftest_cert_lens[0] > sizeof staged) break;
+        memcpy(staged + off, k_selftest_certs[0], k_selftest_cert_lens[0]);
+        mbedtls_x509_crt one;
+        mbedtls_x509_crt_init(&one);
+        int r = mbedtls_x509_crt_parse_der(&one, staged + off,
+                                           k_selftest_cert_lens[0]);
+        printf("selftest: offset %2d (%d mod 4) -> %s (rc=-0x%04X)\n",
+               off, off % 4, r == 0 ? "OK" : "FAILED", (unsigned)(-r));
+        mbedtls_x509_crt_free(&one);
+    }
+
+    /* And the verification the handshake would do next, against our roots. */
+    mbedtls_x509_crt roots;
+    mbedtls_x509_crt_init(&roots);
+    int rc = mbedtls_x509_crt_parse(&roots, (const unsigned char *)k_ca_roots_pem,
+                                    sizeof k_ca_roots_pem);
+    if (rc != 0) {
+        printf("selftest: roots parse FAILED rc=-0x%04X\n", (unsigned)(-rc));
+    } else {
+        uint32_t flags = 0;
+        rc = mbedtls_x509_crt_verify(&chain, &roots, NULL, "relay.tesserae.ink",
+                                     &flags, NULL, NULL);
+        printf("selftest: verify vs roots rc=%d (-0x%04X) flags=0x%08x\n",
+               rc, (unsigned)(-rc), (unsigned)flags);
+        if (flags) {
+            char info[256];
+            mbedtls_x509_crt_verify_info(info, sizeof info, "selftest:   ", flags);
+            fputs(info, stdout);
+        }
+    }
+    mbedtls_x509_crt_free(&roots);
+    mbedtls_x509_crt_free(&chain);
+
     net_tls_log_heap("selftest-done");
 }
 #endif
@@ -211,6 +308,11 @@ struct altcp_tls_config *net_tls_config(void)
         printf("tls: could not create the client config (root store or memory)\n");
         return NULL;
     }
+    /* NOTE: max_fragment_length is compiled in but cannot be CONFIGURED here --
+     * lwIP keeps struct altcp_tls_config private to altcp_tls_mbedtls.c and
+     * offers no setter, so mbedtls_ssl_conf_max_frag_len() is out of reach
+     * without patching the glue. The 4 KB record buffer is therefore a local
+     * constraint the server is not told about; see mbedtls_config.h. */
     printf("tls: client config ready (%u bytes of built-in roots)\n",
            (unsigned)sizeof k_ca_roots_pem);
     return s_conf;

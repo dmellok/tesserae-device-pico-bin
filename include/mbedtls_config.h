@@ -113,14 +113,29 @@
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED
 
-/* Record buffers. Inbound must be the full 16 KB: TLS 1.2 has no negotiated way
- * to make a server send smaller records, and a server that sends a max-size one
- * to a client with a short buffer produces a fatal alert, not a retry.
- * Outbound is capped low on purpose -- our largest request is a status POST of
- * a few hundred bytes, and each KB here is a KB of SRAM held for the whole
- * connection. */
-#define MBEDTLS_SSL_IN_CONTENT_LEN   16384
+/* Record buffers.
+ *
+ * 4096, NOT the 16384 a TLS peer is otherwise entitled to send. This is load
+ * bearing and was found the hard way: at 16384 every handshake to the relay
+ * died in mbedtls_x509_crt_parse_der with MBEDTLS_ERR_MPI_ALLOC_FAILED, even
+ * though the certificate bytes in the buffer were verified byte-identical to
+ * what the server sent, the same bytes parsed correctly on this same device
+ * from a shallow call chain, the heap had 350 KB free with the allocator
+ * wrapper never firing, and the stack peaked at 6 KB of 16 KB. Dropping to 4096
+ * makes the handshake complete and the chain verify cleanly. The mechanism is
+ * NOT yet understood -- see the README's "Known issues" -- so treat this value
+ * as a fix whose reason is still open, and do not raise it without retesting a
+ * full relay handshake on hardware.
+ *
+ * RESIDUAL RISK: 4096 is below the 16384 a peer may send unasked, and lwIP
+ * keeps its ssl_config private so max_fragment_length cannot be negotiated
+ * without patching the glue. Small JSON calls (pair, status, config) are far
+ * inside the limit and are proven working on hardware. The ~960 KB FRAME
+ * download is not yet proven: if the relay sends records larger than 4 KB it
+ * will fail with a fatal alert. That is the next thing to verify. */
+#define MBEDTLS_SSL_IN_CONTENT_LEN   4096
 #define MBEDTLS_SSL_OUT_CONTENT_LEN  4096
+
 
 /* Error strings cost about 8 KB of flash (of 16 MB) and turn "handshake failed:
  * -0x2700" into something actionable in a field log. Worth it. */

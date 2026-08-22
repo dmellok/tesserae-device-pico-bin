@@ -52,3 +52,11 @@ void net_tls_log_heap(const char *when);
  * involved. Debug builds only; see net_tls.c. */
 void net_tls_selftest(void);
 #endif
+
+#ifdef TESSERAE_TLS_DEBUG
+/* Fill the unused stack with a pattern, then report the deepest word that was
+ * overwritten. Stack exhaustion corrupts silently on this target, so the only
+ * way to know the stack is big enough is to measure it. */
+void net_tls_paint_stack(void);
+void net_tls_log_stack(const char *when);
+#endif
