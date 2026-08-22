@@ -34,10 +34,30 @@ else
     echo "flash: no serial port (device asleep?) -- double-tap RESET to enter BOOTSEL"
 fi
 
+# Mount the BOOTSEL volume if macOS has enumerated the disk but not mounted it.
+# This is not rare: the RP2350 appears as a FAT16 volume named RP2350, and
+# Finder sometimes leaves it unmounted, in which case /Volumes/RP2350 never
+# shows up and the wait below times out while the drive is sitting right there
+# in `diskutil list`.
+try_mount_bootsel() {
+    [ -d /Volumes/RP2350 ] && return 0
+    local dev
+    dev=$(diskutil list 2>/dev/null | awk '/ RP2350 /{print $NF}' | head -1)
+    [ -n "$dev" ] || return 1
+    diskutil mount "$dev" >/dev/null 2>&1 || return 1
+    # The mount is asynchronous enough that an immediate copy can still race.
+    for _ in 1 2 3 4 5; do
+        [ -d /Volumes/RP2350 ] && return 0
+        sleep 1
+    done
+    return 1
+}
+
 echo "flash: waiting for the RP2350 BOOTSEL drive..."
 for _ in $(seq 1 60); do
+    try_mount_bootsel
     if [ -d /Volumes/RP2350 ]; then
-        for try in 1 2 3 4 5; do
+        for try in 1 2 3 4 5 6 7 8 9 10; do
             if cp "$UF2" /Volumes/RP2350/firmware.uf2 2>/dev/null; then
                 sync
                 diskutil eject RP2350 >/dev/null 2>&1
@@ -46,7 +66,7 @@ for _ in $(seq 1 60); do
             fi
             sleep 1   # permission race while the drive finishes mounting
         done
-        echo "flash: copy failed (permission race) -- re-run"; exit 1
+        echo "flash: copy failed after 10 tries -- re-run"; exit 1
     fi
     sleep 0.5
 done

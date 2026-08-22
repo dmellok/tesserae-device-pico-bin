@@ -71,7 +71,7 @@
 /* How long BTN_A must be held during the boot window to wipe the config.
  * Long enough that it cannot happen by accident (the device is usually being
  * handled when it is reset), short enough to be a believable instruction. */
-#define FACTORY_RESET_HOLD_MS  20000
+#define FACTORY_RESET_HOLD_MS  10000
 
 /* Whether status splashes may paint this boot. See maybe_show_status(). */
 static bool s_status_splash_allowed;
@@ -978,6 +978,10 @@ int main(void)
     }
 #endif
 #ifdef ALWAYS_ON
+    /* Seeded on EVERY boot, including with the value 0, because this is the
+     * only thing that can clear a stored always_on. Guarding the write behind
+     * "is it non-zero" would mean deleting the define leaves a device kiosked
+     * forever with no way back short of a factory reset. */
     config_set_always_on(ALWAYS_ON);
 #endif
     bool changed = !had_config ||

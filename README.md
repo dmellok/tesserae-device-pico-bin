@@ -25,7 +25,7 @@ pieces:
 - Captive provisioning portal (setup AP + DHCP + DNS hijack + WiFi scan + form),
   mDNS (`tesserae-pico-XXXX.local`), and on-device procedural splashes that say
   what setup is waiting on
-- Battery telemetry with a low-battery goodbye screen, and a 20-second
+- Battery telemetry with a low-battery goodbye screen, and a 10-second
   front-button hold for a factory reset
 - Reports `kind=pico_bin_client` to Tesserae (see "Tesserae server" below)
 
@@ -354,9 +354,10 @@ and never touches PSRAM or the wireless radio.
 
 ## Factory reset
 
-Hold the **A** button (leftmost, GP15) and tap RESET, then keep holding for 20
+Hold the **A** button (leftmost, GP15) and tap RESET, then keep holding for 10
 seconds. The stored config is erased and the device reboots into the setup
-portal. Serial narrates the countdown, and releasing at any point cancels.
+portal. Serial narrates the countdown once a second, and releasing at any point
+cancels.
 
 This exists because the connectivity-failure fallback cannot cover everything:
 a device whose SSID still connects but whose server URL is wrong will never

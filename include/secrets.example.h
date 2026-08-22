@@ -39,8 +39,12 @@
  * mDNS and the 1200-baud flash touch reachable between refreshes, which makes
  * bench work far less painful. USB power only -- the radio and core stay up,
  * and this will flatten a battery in hours. The server can also set it (relay
- * config always_on). */
-//#define ALWAYS_ON       1
+ * config always_on).
+ *
+ * Set it to 0 to turn kiosk mode OFF rather than deleting the line: this seed
+ * is the only thing that clears a stored always_on, so a device that was once
+ * kiosked stays kiosked if the define simply disappears. */
+//#define ALWAYS_ON       0
 
 /* MQTT broker and identity (legacy; only used when SERVER_URL is not set). */
 //#define MQTT_URI        "mqtt://homeassistant.local:1883"
