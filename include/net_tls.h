@@ -41,3 +41,8 @@ void net_tls_deinit(void);
  * surface as bare negative hex otherwise, which is unactionable in a field
  * log. */
 void net_tls_log_error(const char *what, int rc);
+
+/* Print the heap picture (total, sbrk high-water, unclaimed, malloc arena).
+ * The TLS path is the firmware's only large dynamic consumer, so this is the
+ * number that decides whether a handshake can succeed at all. */
+void net_tls_log_heap(const char *when);

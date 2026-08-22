@@ -4,14 +4,18 @@
 #include "net_tls.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <malloc.h>
+#include <unistd.h>
 
 #include "pico/stdlib.h"    /* time_us_64 */
 #include "lwip/altcp.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/error.h"
+#include "mbedtls/debug.h"
 #include "mbedtls/platform.h"
 #include "mbedtls/platform_time.h"
 
@@ -20,6 +24,42 @@
 
 static struct altcp_tls_config *s_conf;
 static bool s_tried;          /* one init attempt per boot, success or not */
+
+/* ---- heap instrumentation ------------------------------------------------
+ *
+ * mbedTLS reports an out-of-memory as MBEDTLS_ERR_MPI_ALLOC_FAILED (-0x0010)
+ * from wherever the bignum layer happened to be, which says nothing about how
+ * much was wanted or what was already gone. Since the whole TLS path lives or
+ * dies on the heap, route mbedTLS's allocator through a wrapper that reports
+ * the exact failing size, and print the heap picture alongside it. */
+
+extern char __end__;        /* start of the heap (end of .bss) */
+extern char __HeapLimit;    /* ceiling sbrk may grow to */
+
+void net_tls_log_heap(const char *when)
+{
+    struct mallinfo mi = mallinfo();
+    char *brk = (char *)sbrk(0);
+    printf("heap[%s]: total=%u brk_used=%u unclaimed=%u  arena=%u in_use=%u free=%u\n",
+           when,
+           (unsigned)(&__HeapLimit - &__end__),
+           (unsigned)(brk - &__end__),
+           (unsigned)(&__HeapLimit - brk),
+           (unsigned)mi.arena, (unsigned)mi.uordblks, (unsigned)mi.fordblks);
+}
+
+static void *tls_calloc(size_t n, size_t sz)
+{
+    void *p = calloc(n, sz);
+    if (p == NULL) {
+        printf("tls: CALLOC FAILED for %u x %u = %u bytes\n",
+               (unsigned)n, (unsigned)sz, (unsigned)(n * sz));
+        net_tls_log_heap("calloc-fail");
+    }
+    return p;
+}
+
+static void tls_free(void *p) { free(p); }
 
 /* ---- wall clock ----------------------------------------------------------
  *
@@ -73,7 +113,21 @@ mbedtls_ms_time_t mbedtls_ms_time(void)
  * deep sleep), dates are checked normally. */
 static int verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags)
 {
-    (void)ctx; (void)crt;
+    (void)ctx;
+
+    /* Reaching this callback at all is the key diagnostic when a handshake
+     * fails: it means we got as far as the server's certificate chain, so the
+     * ciphersuite and curve negotiation succeeded and any failure is a TRUST
+     * problem (a CA we do not carry, a name mismatch). A handshake that dies
+     * without ever calling this failed earlier -- no shared ciphersuite, no
+     * shared curve -- which has an entirely different fix. Printing the subject
+     * also confirms which chain the relay is actually serving today, without
+     * needing openssl on the far end. */
+    char subject[128] = "(none)";
+    if (crt != NULL)
+        mbedtls_x509_dn_gets(subject, sizeof subject, &crt->subject);
+    printf("tls: verify depth %d flags 0x%08x: %s\n",
+           depth, (unsigned)*flags, subject);
 
     if (sleep_epoch_now() != 0) return 0;    /* clock is good: no leniency */
 
@@ -93,6 +147,16 @@ struct altcp_tls_config *net_tls_config(void)
     s_tried = true;
 
     mbedtls_platform_set_time(tesserae_time);
+    mbedtls_platform_set_calloc_free(tls_calloc, tls_free);
+    net_tls_log_heap("tls-init");
+
+#ifdef TESSERAE_TLS_DEBUG
+    /* lwIP's glue installs the debug CALLBACK but never raises mbedTLS's global
+     * threshold, which defaults to 0 and suppresses every message before the
+     * callback is ever reached. 3 gives state transitions and errors with
+     * file:line, which is what identifies the failing step. */
+    mbedtls_debug_set_threshold(3);
+#endif
 
     /* PEM: the length must INCLUDE the NUL terminator, hence sizeof. Passing
      * strlen() here is the classic way to get a silent parse failure. */
@@ -148,3 +212,4 @@ void net_tls_log_error(const char *what, int rc)
     mbedtls_strerror(rc, buf, sizeof buf);
     printf("tls: %s failed: -0x%04x (%s)\n", what, -rc, buf);
 }
+

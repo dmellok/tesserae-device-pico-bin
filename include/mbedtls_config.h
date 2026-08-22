@@ -100,6 +100,16 @@
 #define MBEDTLS_SSL_SERVER_NAME_INDICATION           /* SNI: required by any CDN */
 #define MBEDTLS_SSL_ENCRYPT_THEN_MAC
 #define MBEDTLS_SSL_EXTENDED_MASTER_SECRET
+
+/* ON by default upstream, and easy to lose when writing a config from scratch.
+ * Without it the handshake takes mbedtls_x509_crt_parse_der_NOCOPY, which keeps
+ * pointers into ssl->in_msg instead of copying the chain out. That buffer is
+ * the live record-reassembly area: it keeps being written as the handshake
+ * continues, so the peer chain can be overwritten underneath the parsed
+ * structures. Both paths parse this server's chain correctly in isolation
+ * (verified on the host), which is exactly what makes the in-place variant the
+ * suspect -- its failure mode needs a live buffer to show up at all. */
+#define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED
 
@@ -115,6 +125,16 @@
 /* Error strings cost about 8 KB of flash (of 16 MB) and turn "handshake failed:
  * -0x2700" into something actionable in a field log. Worth it. */
 #define MBEDTLS_ERROR_C
+
+/* MBEDTLS_DEBUG_C is what makes the library's own handshake trace possible.
+ * Without it, debug.c compiles to an empty object and lwIP's
+ * mbedtls_ssl_conf_dbg() hook is never able to say anything -- so a failed
+ * handshake reports only its final return code, with no indication of which
+ * step produced it. Debug-build only: the trace is chatty enough to alter the
+ * timing it is being used to investigate. */
+#ifdef TESSERAE_TLS_DEBUG
+#define MBEDTLS_DEBUG_C
+#endif
 
 /* Do NOT include mbedtls/check_config.h here. In mbedTLS 3.x, build_info.h
  * pulls this file in and only THEN applies its config_adjust_*.h layer, which

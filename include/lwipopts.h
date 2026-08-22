@@ -28,7 +28,12 @@
 #define LWIP_ICMP                   1
 #define LWIP_RAW                    1
 #define TCP_MSS                     1460
-#define TCP_WND                     (8 * TCP_MSS)
+/* TCP_WND must be at least MBEDTLS_SSL_IN_CONTENT_LEN (16384), or altcp_tls
+ * warns "TCP_WND is smaller than the RX decryption buffer, connection RX might
+ * stall" -- and it is right: a peer that sends a full-size TLS record cannot
+ * fit it inside the advertised window, so mbedTLS waits for a record that the
+ * window will not let arrive. 12 MSS = 17520 clears it with margin. */
+#define TCP_WND                     (12 * TCP_MSS)
 #define TCP_SND_BUF                 (8 * TCP_MSS)
 #define TCP_SND_QUEUELEN            ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define LWIP_NETIF_STATUS_CALLBACK  1
@@ -96,6 +101,33 @@
         g_sntp_got   = 1; \
     } while (0)
 
+/* TESSERAE_TLS_DEBUG turns on just the altcp_tls channel, which is where the
+ * SDK's glue logs "mbedtls_ssl_handshake failed: %d". Without it a failed
+ * handshake surfaces only as a dead pcb, i.e. "transport error" with no cause.
+ * Scoped to one channel on purpose: LWIP_DEBUG with the default channel mask
+ * floods the CDC port badly enough to change the timing being debugged. */
+#ifdef TESSERAE_TLS_DEBUG
+#define LWIP_DEBUG                  1
+#define ALTCP_MBEDTLS_DEBUG         LWIP_DBG_ON
+#define ALTCP_MBEDTLS_LIB_DEBUG     LWIP_DBG_ON
+/* _LEVEL_MIN, not _LEVEL: this is the floor the glue applies to each message,
+ * so 0 lets everything mbedTLS emits through. The CEILING is mbedTLS's own
+ * global threshold, which defaults to 0 (= silent) and which the SDK's glue
+ * never sets -- net_tls.c calls mbedtls_debug_set_threshold() for that. Both
+ * are required; setting only one produces no output at all. */
+#define ALTCP_MBEDTLS_LIB_DEBUG_LEVEL_MIN 0
+/* The SDK's arch/cc.h defines LWIP_PLATFORM_ASSERT but not LWIP_PLATFORM_DIAG,
+ * so route debug output at printf (which is stdio-USB here) explicitly rather
+ * than relying on lwIP's fallback. */
+/* stdio.h rather than a bare printf: lwipopts.h is included by translation
+ * units that have not included it, and an implicit declaration of a variadic
+ * function is undefined behaviour, not just a warning. */
+#include <stdio.h>
+#define LWIP_PLATFORM_DIAG(x)       do { printf x; } while (0)
+#define LWIP_DBG_MIN_LEVEL          LWIP_DBG_LEVEL_ALL
+#define LWIP_DBG_TYPES_ON           LWIP_DBG_ON
+#else
 #define LWIP_DEBUG                  0
+#endif
 
 #endif /* _LWIPOPTS_H */

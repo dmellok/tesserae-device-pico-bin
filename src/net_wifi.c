@@ -88,7 +88,13 @@ static bool remember_ap(void)
 
     const config_t *c = config_get();
     bool same = c->ap_hint && memcmp(c->ap_bssid, bssid, 6) == 0;
-    return config_set_ap_hint(bssid, same ? c->ap_channel : 0);
+    uint8_t chan = same ? c->ap_channel : 0;
+
+    /* Without a channel the hint is unusable (see wifi_connect), so store
+     * nothing rather than a BSSID that will never be tried. Keeping it would
+     * only make the config look like it holds a hint it cannot act on. */
+    if (chan == 0) return config_clear_ap_hint();
+    return config_set_ap_hint(bssid, chan);
 }
 
 bool wifi_connect(const char *ssid, const char *pass, uint32_t timeout_ms,
@@ -109,10 +115,19 @@ bool wifi_connect(const char *ssid, const char *pass, uint32_t timeout_ms,
     uint32_t auth = have_pass ? CYW43_AUTH_WPA2_AES_PSK : CYW43_AUTH_OPEN;
     const char *pw = have_pass ? pass : NULL;
 
-    /* Fast path: target the AP we last associated with. */
+    /* Fast path: target the AP we last associated with.
+     *
+     * A KNOWN CHANNEL is required, not merely nice to have. Hardware says a
+     * BSSID-targeted join with CYW43_CHANNEL_NONE is rejected outright by
+     * cyw43_wifi_join (-2, PICO_ERROR_GENERIC) rather than falling back to a
+     * scan, so a channel-less hint does not just fail to help -- it guarantees
+     * a wasted attempt on every single wake, and then clears itself, and then
+     * gets re-stored channel-less by remember_ap(). That loop made the feature
+     * a permanent net loss. The channel only ever comes from a scan, which
+     * means the portal (net_portal.c). */
     const config_t *c = config_get();
-    if (c->ap_hint) {
-        uint32_t chan = c->ap_channel ? c->ap_channel : CYW43_CHANNEL_NONE;
+    if (c->ap_hint && c->ap_channel != 0) {
+        uint32_t chan = c->ap_channel;
         printf("wifi: fast connect to '%s' (%02x:%02x:%02x:%02x:%02x:%02x ch %u)\n",
                ssid, c->ap_bssid[0], c->ap_bssid[1], c->ap_bssid[2],
                c->ap_bssid[3], c->ap_bssid[4], c->ap_bssid[5],
