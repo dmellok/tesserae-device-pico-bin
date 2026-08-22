@@ -128,6 +128,11 @@ uint32_t sleep_relay_authfail(void)      { return scratch_get16(5); }
 void     sleep_relay_authfail_inc(void)  { scratch_put16(5, scratch_get16(5) + 1); }
 void     sleep_relay_authfail_reset(void){ scratch_put16(5, 0); }
 
+uint64_t sleep_raw_ms(void)
+{
+    return powman_timer_get_ms();
+}
+
 void sleep_set_epoch(uint32_t sec)
 {
     sleep_timer_init();

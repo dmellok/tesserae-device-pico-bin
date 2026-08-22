@@ -68,6 +68,16 @@ uint32_t sleep_relay_authfail(void);
 void     sleep_relay_authfail_inc(void);
 void     sleep_relay_authfail_reset(void);
 
+/* Raw POWMAN timer value in milliseconds.
+ *
+ * Unlike sleep_epoch_now() this never returns 0 and keeps counting across deep
+ * sleeps, which is what makes it usable for "has N hours passed" over a span of
+ * many wakes. It is NOT strictly monotonic, though: it is the same timer the
+ * wall clock lives in, so sleep_set_epoch() makes it jump forward by decades.
+ * Callers measuring an interval must therefore treat an implausible delta as a
+ * clock correction and re-baseline rather than as elapsed time. */
+uint64_t sleep_raw_ms(void);
+
 /* Set the wall-clock from an epoch (seconds). Called by the SNTP layer. */
 void sleep_set_epoch(uint32_t sec);
 

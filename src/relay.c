@@ -161,8 +161,9 @@ static relay_pair_result_t pair_submit(const config_t *c,
 
     /* Persist the private key BEFORE reporting progress: pairing polls can span
      * deep sleeps, and losing the scalar would strand the code (which is
-     * single-use for the POST, so it could not simply be retried). */
-    config_set_relay_priv(priv);
+     * single-use for the POST, so it could not simply be retried). The same
+     * write stamps the start of the pairing window. */
+    config_set_relay_priv(priv, sleep_raw_ms());
     *dirty = true;
     printf("relay: pairing submitted (%ux%u, %s/%s); waiting for the home instance\n",
            (unsigned)panel_w, (unsigned)panel_h,
@@ -175,8 +176,47 @@ static relay_pair_result_t pair_submit(const config_t *c,
  * The poll route has NO expiry check, so this may span as many deep-sleep wakes
  * as home's completion poller needs. The 10-minute code expiry is enforced only
  * by POST /v1/pair, which is why pair_submit() runs exactly once. */
+/* Has this pairing attempt outlived its window?
+ *
+ * The elapsed check has to survive the wall clock being set, because that moves
+ * the very timer this measures (sleep_raw_ms). A backwards jump, or a delta
+ * larger than the window could plausibly produce, is a clock correction rather
+ * than elapsed time -- so re-baseline and keep going. Erring toward "not
+ * expired" is deliberate: wrongly expiring costs the operator a physical trip
+ * to type a fresh code, while wrongly continuing costs one more poll. */
+static bool pair_window_expired(const config_t *c, bool *dirty)
+{
+    if (c->relay_pair_started_ms == 0) return false;   /* not started yet */
+
+    uint64_t now = sleep_raw_ms();
+    if (now < c->relay_pair_started_ms ||
+        (now - c->relay_pair_started_ms) > RELAY_PAIR_WINDOW_MS * 2) {
+        printf("relay: pairing clock jumped; restarting the %u h window\n",
+               (unsigned)(RELAY_PAIR_WINDOW_MS / 3600000ull));
+        config_set_relay_pair_started(now);
+        *dirty = true;
+        return false;
+    }
+
+    uint64_t elapsed = now - c->relay_pair_started_ms;
+    if (elapsed <= RELAY_PAIR_WINDOW_MS) {
+        printf("relay: pairing pending for %u min of %u h\n",
+               (unsigned)(elapsed / 60000ull),
+               (unsigned)(RELAY_PAIR_WINDOW_MS / 3600000ull));
+        return false;
+    }
+    return true;
+}
+
 static relay_pair_result_t pair_poll(const config_t *c, bool *dirty)
 {
+    if (pair_window_expired(c, dirty)) {
+        printf("relay: pairing window elapsed without completion; clearing\n");
+        config_clear_relay();
+        *dirty = true;
+        return RELAY_PAIR_EXPIRED;
+    }
+
     char url[256];
     snprintf(url, sizeof url, "%s/v1/pair/%s", c->relay_url, c->relay_code);
 
@@ -459,11 +499,10 @@ relay_config_result_t relay_sync_config(bool *dirty)
         config_set_tz(cfg.tz);
         changed = true;
     }
-    /* always_on is parsed and logged but not acted on: this board has no
-     * stay-awake mode yet (see the roadmap in README). Adopting it silently
-     * would make the Devices UI claim a behaviour the panel does not have. */
-    if (cfg.always_on >= 0 && cfg.always_on != 0)
-        printf("relay: server asked for always_on, which this board does not support\n");
+    if (cfg.always_on >= 0 && config_set_always_on(cfg.always_on != 0)) {
+        printf("relay: always_on -> %s\n", cfg.always_on ? "on" : "off");
+        changed = true;
+    }
 
     /* Store the etag only now: everything above succeeded, so a 304 next wake
      * genuinely means "you already have this". Always persisted, even when no
@@ -471,10 +510,11 @@ relay_config_result_t relay_sync_config(bool *dirty)
     config_set_relay_config_etag(resp.etag);
     *dirty = true;
 
-    printf("relay: config applied (etag %s): sleep=%lds tz=%s%s\n",
+    printf("relay: config applied (etag %s): sleep=%lds tz=%s always_on=%d%s\n",
            resp.etag[0] ? resp.etag : "(none)",
            (long)config_get()->sleep_s,
            config_get()->tz[0] ? config_get()->tz : "(none)",
+           config_get()->always_on ? 1 : 0,
            changed ? "" : " (no change)");
     return RELAY_CFG_APPLIED;
 }

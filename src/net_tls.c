@@ -154,8 +154,10 @@ struct altcp_tls_config *net_tls_config(void)
     /* lwIP's glue installs the debug CALLBACK but never raises mbedTLS's global
      * threshold, which defaults to 0 and suppresses every message before the
      * callback is ever reached. 3 gives state transitions and errors with
-     * file:line, which is what identifies the failing step. */
-    mbedtls_debug_set_threshold(3);
+     * file:line, which is what identifies the failing step; 4 adds a hexdump of
+     * every record as it comes off the wire, which is the only way to compare
+     * what the device received against what the server actually sent. */
+    mbedtls_debug_set_threshold(TESSERAE_TLS_DEBUG >= 2 ? 4 : 3);
 #endif
 
     /* PEM: the length must INCLUDE the NUL terminator, hence sizeof. Passing

@@ -874,6 +874,14 @@ static void run_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
         reached = do_cycle(panel, variant, psram_sz);
     if (reached) { sleep_failcount_reset(); return; }
 
+    /* Note: a pairing that is progressing normally never reaches here at all --
+     * RELAY_PAIR_WAITING is reported as "reached", because getting an answer
+     * from the relay is exactly what success looks like while home completes
+     * its half. So the 24-hour patience costs nothing here, and the counter
+     * still fires when the relay is genuinely UNREACHABLE. That distinction is
+     * what keeps the setup portal available: suppressing the counter for any
+     * pending pairing would lock the operator out for a day on a device whose
+     * real problem is that it cannot reach the relay at all. */
     sleep_failcount_inc();
     uint32_t fails = sleep_failcount();
     printf("net: connectivity failure %u/%u\n", (unsigned)fails, MAX_CONNECT_FAILS);
@@ -947,15 +955,25 @@ int main(void)
     config_set_pairing_code(PAIRING_CODE);   /* optional; blank = discover/claim */
 #  endif
 #endif
-#ifdef RELAY_CODE
-    /* A relay code seeds a pairing attempt on the next cycle. The URL defaults
-     * to the hosted relay so a bench test only has to define the code. */
-#  ifdef RELAY_URL
+#ifdef RELAY_URL
     config_set_relay_url(RELAY_URL);
-#  else
-    config_set_relay_url(RELAY_DEFAULT_URL);
-#  endif
-    config_set_relay_code(RELAY_CODE);
+#endif
+#ifdef RELAY_CODE
+    /* A relay code seeds a pairing attempt. Applied only when it differs from
+     * what is already stored: re-applying it on every boot would restart the
+     * pairing window each time (and, once paired, would clear a perfectly good
+     * mailbox), so the code in secrets.h acts as a seed rather than a
+     * standing instruction. */
+    if (strcmp(config_get()->relay_code, RELAY_CODE) != 0 && !config_relay_ready()) {
+        if (config_get()->relay_url[0] == '\0')
+            config_set_relay_url(RELAY_DEFAULT_URL);
+        config_clear_relay();
+        config_set_relay_code(RELAY_CODE);
+        printf("config: seeded relay pairing code from secrets.h\n");
+    }
+#endif
+#ifdef ALWAYS_ON
+    config_set_always_on(ALWAYS_ON);
 #endif
     bool changed = !had_config ||
                    memcmp(&before, config_get(), sizeof(config_t)) != 0;
@@ -1035,18 +1053,36 @@ int main(void)
      * run_cycle re-opens the portal after repeated connectivity failures. */
     run_cycle(panel, variant, psram_sz);
 
+    /* Kiosk mode: hold the cycle open on a timer instead of deep-sleeping.
+     * Worth being explicit about the cost -- the radio and the core stay
+     * powered, so this is USB-power behaviour and would flatten a cell in
+     * hours. It is never inferred; it comes from config.always_on, which is
+     * either seeded from secrets.h or pushed by the server. */
     int32_t sleep_s = config_get()->sleep_s;
-    if (sleep_s > 0) {
+    if (!config_get()->always_on && sleep_s > 0) {
         uint32_t now = sleep_epoch_now();
         if (now) printf("sleep: until epoch %lu\n", (unsigned long)(now + sleep_s));
         printf("sleep: deep sleep for %ld s (wake reboots)\n", (long)sleep_s);
         sleep_deep_ms((uint64_t)sleep_s * 1000ull);   /* does not return */
     }
 
-    printf("dev: sleep_s<=0, staying awake; re-checking every %ds\n",
-           DEV_LOOP_INTERVAL_MS / 1000);
+    /* Stay awake and loop. The interval is the server's own poll interval when
+     * there is one, so a kiosk device refreshes at the same rate a sleeping one
+     * would, rather than hammering the server at the dev default. */
+    uint32_t loop_ms = (sleep_s > 0) ? (uint32_t)sleep_s * 1000u : DEV_LOOP_INTERVAL_MS;
+    printf("awake: %s; re-checking every %u s\n",
+           config_get()->always_on ? "always_on set" : "sleep_s<=0",
+           (unsigned)(loop_ms / 1000u));
     while (true) {
-        sleep_ms(DEV_LOOP_INTERVAL_MS);
+        sleep_ms(loop_ms);
         run_cycle(panel, variant, psram_sz);
+        /* Re-read each pass: the server can turn kiosk mode off mid-session,
+         * and the next cycle should then go back to sleeping. */
+        int32_t s = config_get()->sleep_s;
+        if (!config_get()->always_on && s > 0) {
+            printf("sleep: always_on cleared; deep sleep for %ld s\n", (long)s);
+            sleep_deep_ms((uint64_t)s * 1000ull);   /* does not return */
+        }
+        loop_ms = (s > 0) ? (uint32_t)s * 1000u : DEV_LOOP_INTERVAL_MS;
     }
 }

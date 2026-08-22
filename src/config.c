@@ -156,6 +156,14 @@ void config_set_tz(const char *tz)
     set_str(s_cfg.tz, sizeof s_cfg.tz, tz);
 }
 
+bool config_set_always_on(bool on)
+{
+    uint8_t v = on ? 1 : 0;
+    if (s_cfg.always_on == v) return false;
+    s_cfg.always_on = v;
+    return true;
+}
+
 bool config_set_ap_hint(const uint8_t bssid[6], uint8_t channel)
 {
     if (bssid == NULL) return false;
@@ -189,11 +197,18 @@ void config_set_relay_code(const char *code)
     set_str(s_cfg.relay_code, sizeof s_cfg.relay_code, code);
 }
 
-void config_set_relay_priv(const uint8_t priv[CONFIG_RELAY_PRIV_LEN])
+void config_set_relay_priv(const uint8_t priv[CONFIG_RELAY_PRIV_LEN],
+                           uint64_t started_ms)
 {
     if (priv == NULL) return;
     memcpy(s_cfg.relay_priv, priv, CONFIG_RELAY_PRIV_LEN);
     s_cfg.relay_have_priv = 1;
+    s_cfg.relay_pair_started_ms = started_ms;
+}
+
+void config_set_relay_pair_started(uint64_t started_ms)
+{
+    s_cfg.relay_pair_started_ms = started_ms;
 }
 
 void config_set_relay_paired(const char *install_id, const char *device_id,
@@ -236,6 +251,7 @@ void config_clear_relay(void)
     memset(s_cfg.relay_key,  0, sizeof s_cfg.relay_key);
     s_cfg.relay_have_priv = 0;
     s_cfg.relay_paired = 0;
+    s_cfg.relay_pair_started_ms = 0;
     /* relay_url is operator configuration, not pairing state: it survives. */
 }
 

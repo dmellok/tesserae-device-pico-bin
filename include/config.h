@@ -49,6 +49,16 @@ typedef struct {
      * until the server delivers one; echoed back on every heartbeat. */
     char    tz[40];
 
+    /* Kiosk mode: never deep-sleep, run the cycle on a timer instead.
+     *
+     * A hardware fact plus an operator choice. The board CAN stay awake, and on
+     * USB power there is no reason not to: it makes the panel reachable (serial,
+     * mDNS, the 1200-baud flash touch) between refreshes instead of dark for
+     * minutes at a time. On battery it is ruinous, which is why it is opt-in and
+     * not merely "sleep_s <= 0". Settable from the server (relay config
+     * always_on) or seeded from secrets.h. */
+    uint8_t always_on;
+
     /* ---- cloud relay (see relay.h) ----
      * A relay panel talks only to the relay mailbox and needs no server_url.
      * relay_priv is held ONLY between the pairing POST and the key derivation,
@@ -65,6 +75,10 @@ typedef struct {
     uint8_t relay_key[CONFIG_RELAY_KEY_LEN];
     uint8_t relay_have_priv;        /* 1 while the X25519 scalar is held */
     uint8_t relay_paired;           /* 1 once install/device/token/key are all set */
+    /* Monotonic ms (POWMAN timer) when this pairing attempt began, so a code can
+     * be given a generous wall-clock window instead of a retry count. 0 = not
+     * started. See RELAY_PAIR_WINDOW_MS in relay.h. */
+    uint64_t relay_pair_started_ms;
 } config_t;
 
 /* Load config from flash into the in-RAM copy. Returns true if a valid saved
@@ -105,6 +119,9 @@ void config_set_frame_etag(const char *etag);
 /* Timezone published by the server (proto v2). Empty clears it. */
 void config_set_tz(const char *tz);
 
+/* Kiosk mode. Returns true if the value changed (so the caller knows to save). */
+bool config_set_always_on(bool on);
+
 /* WiFi fast-connect hint. config_set_ap_hint stores the BSSID + channel of a
  * successful association; config_clear_ap_hint drops a hint that failed. Both
  * are no-ops when the value is unchanged, so a steady-state wake never dirties
@@ -117,8 +134,16 @@ bool config_clear_ap_hint(void);
 void config_set_relay_url(const char *url);
 void config_set_relay_code(const char *code);
 
-/* Persist the X25519 scalar between the pairing POST and the key derivation. */
-void config_set_relay_priv(const uint8_t priv[CONFIG_RELAY_PRIV_LEN]);
+/* Persist the X25519 scalar between the pairing POST and the key derivation.
+ * Also stamps relay_pair_started_ms, since submitting the code is what starts
+ * the pairing window. */
+void config_set_relay_priv(const uint8_t priv[CONFIG_RELAY_PRIV_LEN],
+                           uint64_t started_ms);
+
+/* Re-stamp the pairing window's start. Used when the monotonic clock has
+ * obviously jumped (the wall clock being set moves the same POWMAN timer), so a
+ * pairing is never expired by a clock correction. */
+void config_set_relay_pair_started(uint64_t started_ms);
 
 /* Adopt a completed pairing: mailbox identity + derived frame key. Wipes the
  * private scalar, which is no longer needed and must not outlive the exchange. */

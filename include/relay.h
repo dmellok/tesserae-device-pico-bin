@@ -45,6 +45,23 @@
 #define RELAY_DEVICE_MODEL "pico_bin_client"
 #define RELAY_DEVICE_GAMUT "spectra_6"
 
+/* How long the device keeps working a pairing code before giving up on it.
+ *
+ * The two ends of the rendezvous have very different clocks. The relay enforces
+ * a short expiry on POST /v1/pair only -- which the firmware satisfies by
+ * submitting exactly once, immediately -- while GET /v1/pair/<code> has NO
+ * expiry at all, so the panel may poll for as long as the home instance needs
+ * to complete its half. That half can be slow: it waits on the operator opening
+ * Settings, on the home instance's own poller, and on a panel that may only
+ * wake every few minutes.
+ *
+ * A day is therefore the right patience. Shorter, and a code entered in the
+ * evening is dead by morning even though the relay would still honour it;
+ * longer, and a genuinely abandoned pairing keeps a stale code on the device
+ * indefinitely. Only a 404 (the relay saying the code is gone) or this deadline
+ * clears the state. */
+#define RELAY_PAIR_WINDOW_MS (24ull * 60ull * 60ull * 1000ull)
+
 /* True when the device holds a complete mailbox identity + frame key and
  * should use the relay instead of the direct REST path. */
 bool relay_ready(void);

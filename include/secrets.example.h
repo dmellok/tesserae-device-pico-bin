@@ -21,12 +21,26 @@
 //#define PAIRING_CODE    "123456"
 
 /* Cloud relay (for a panel that cannot reach the Tesserae server directly).
- * Get a single-use code from Settings -> Cloud relay -> Add a remote panel; it
- * expires after 10 minutes, so flash promptly. RELAY_URL defaults to the hosted
- * relay when omitted. A relay panel needs NO SERVER_URL -- the two are
- * alternatives, and the relay wins if both are set. */
+ * Get a single-use code from Settings -> Cloud relay -> Add a remote panel.
+ *
+ * The code is a SEED, not a standing instruction: it is applied only when it
+ * differs from what is stored and the device is not already paired, so a
+ * reflash does not restart pairing or clobber a working mailbox. The device
+ * then works the code for 24 hours (RELAY_PAIR_WINDOW_MS in relay.h) before
+ * giving up -- the relay's own short expiry applies only to the initial
+ * submission, which the firmware does immediately and exactly once.
+ *
+ * A relay panel needs NO SERVER_URL. The two are alternatives, and the relay
+ * wins if both are set. */
 //#define RELAY_URL       "https://relay.tesserae.ink"
-//#define RELAY_CODE      "ABCD-1234"
+//#define RELAY_CODE      "ABCD1234"
+
+/* Kiosk mode: never deep-sleep, run the cycle on a timer instead. Keeps serial,
+ * mDNS and the 1200-baud flash touch reachable between refreshes, which makes
+ * bench work far less painful. USB power only -- the radio and core stay up,
+ * and this will flatten a battery in hours. The server can also set it (relay
+ * config always_on). */
+//#define ALWAYS_ON       1
 
 /* MQTT broker and identity (legacy; only used when SERVER_URL is not set). */
 //#define MQTT_URI        "mqtt://homeassistant.local:1883"
