@@ -141,6 +141,42 @@ static int verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flag
     return 0;
 }
 
+#ifdef TESSERAE_TLS_DEBUG
+#include "tls_selftest_cert.h"
+
+/* Parse the captured chain with no radio and no sockets involved.
+ *
+ * Isolates "does this target's mbedTLS build parse this chain" from every
+ * networking variable. The bytes are known-good: they were recovered from the
+ * device's own level-4 trace and are byte-identical to what openssl sees, and a
+ * host build of this same config parses and verifies them cleanly. */
+void net_tls_selftest(void)
+{
+    mbedtls_platform_set_calloc_free(tls_calloc, tls_free);
+    net_tls_log_heap("selftest");
+
+    for (int i = 0; i < 3; i++) {
+        mbedtls_x509_crt crt;
+        mbedtls_x509_crt_init(&crt);
+        int rc = mbedtls_x509_crt_parse_der(&crt, k_selftest_certs[i],
+                                            k_selftest_cert_lens[i]);
+        if (rc == 0) {
+            char subject[128] = "?";
+            mbedtls_x509_dn_gets(subject, sizeof subject, &crt.subject);
+            printf("selftest: cert%d (%u B) OK  %s\n", i,
+                   (unsigned)k_selftest_cert_lens[i], subject);
+        } else {
+            char buf[128];
+            mbedtls_strerror(rc, buf, sizeof buf);
+            printf("selftest: cert%d (%u B) FAILED rc=%d (-0x%04X) %s\n", i,
+                   (unsigned)k_selftest_cert_lens[i], rc, (unsigned)(-rc), buf);
+        }
+        mbedtls_x509_crt_free(&crt);
+    }
+    net_tls_log_heap("selftest-done");
+}
+#endif
+
 struct altcp_tls_config *net_tls_config(void)
 {
     if (s_tried) return s_conf;
@@ -149,6 +185,13 @@ struct altcp_tls_config *net_tls_config(void)
     mbedtls_platform_set_time(tesserae_time);
     mbedtls_platform_set_calloc_free(tls_calloc, tls_free);
     net_tls_log_heap("tls-init");
+#ifdef TESSERAE_TLS_DEBUG
+    /* Run the offline parse here rather than from main(): stdio-USB drops
+     * everything printed before the host raises DTR, so a boot-time call
+     * is simply never seen. By the time TLS is first needed the port is
+     * long since up. */
+    net_tls_selftest();
+#endif
 
 #ifdef TESSERAE_TLS_DEBUG
     /* lwIP's glue installs the debug CALLBACK but never raises mbedTLS's global

@@ -46,3 +46,9 @@ void net_tls_log_error(const char *what, int rc);
  * The TLS path is the firmware's only large dynamic consumer, so this is the
  * number that decides whether a handshake can succeed at all. */
 void net_tls_log_heap(const char *when);
+
+#ifdef TESSERAE_TLS_DEBUG
+/* Parse a captured, known-good certificate chain at boot with no networking
+ * involved. Debug builds only; see net_tls.c. */
+void net_tls_selftest(void);
+#endif

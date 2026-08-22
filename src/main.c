@@ -912,6 +912,7 @@ int main(void)
     buttons_init();
     maybe_factory_reset();
 
+
     /* Phase 4a (WIP): bring up PSRAM (needed only for frames too big for SRAM,
      * e.g. the 13.3"). Returns 0 on boards without it. The self-test is a
      * temporary de-risk check and will be trimmed once the fetch path uses it. */
