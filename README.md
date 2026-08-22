@@ -7,18 +7,26 @@ ecosystem, alongside `tesserae-device-esp32-bin` and the other
 `tesserae-device-*` firmwares.
 
 Each wake it runs one cycle: detect the panel from its model EEPROM, connect
-WiFi, sync time over SNTP, read the retained frame URL + config from the
-Tesserae MQTT broker, download the panel-native `.bin` frame into PSRAM, paint
-it (skipping the slow refresh when the frame is unchanged), publish a heartbeat,
-then **POWMAN deep sleep** until the next refresh. With no WiFi credentials it
-comes up as a captive-portal setup AP instead. The headline pieces:
+WiFi, ask Tesserae for the current frame, download the panel-native `.bin` into
+PSRAM, paint it (skipping the slow refresh when the frame is unchanged), post a
+heartbeat, then **POWMAN deep sleep** until the next refresh. With no WiFi
+credentials it comes up as a captive-portal setup AP instead. The headline
+pieces:
 
-- WiFi (CYW43) + lwIP, MQTT, SNTP, HTTP frame fetch
-- 8 MB QMI PSRAM for the 960 KB 13.3" frame; SHA-256 dedup so an unchanged
+- Three transports, picked automatically: the **Tesserae REST API** (default),
+  the **cloud relay** for a panel that cannot see the home instance at all, and
+  a legacy MQTT path
+- **HTTPS** throughout (mbedTLS over lwIP altcp) with a small built-in root
+  store and hostname verification
+- 8 MB QMI PSRAM for the 960 KB 13.3" frame; ETag/SHA-256 dedup so an unchanged
   frame never triggers a refresh
-- Real RP2350 POWMAN deep sleep (LPOSC-trimmed), wake-reason tracking
+- Real RP2350 POWMAN deep sleep (LPOSC-trimmed), wake-reason tracking, and a
+  WiFi fast-connect hint that skips the all-channel scan on every wake
 - Captive provisioning portal (setup AP + DHCP + DNS hijack + WiFi scan + form),
-  mDNS (`tesserae-pico-XXXX.local`), and an on-device procedural setup splash
+  mDNS (`tesserae-pico-XXXX.local`), and on-device procedural splashes that say
+  what setup is waiting on
+- Battery telemetry with a low-battery goodbye screen, and a 20-second
+  front-button hold for a factory reset
 - Reports `kind=pico_bin_client` to Tesserae (see "Tesserae server" below)
 
 ### Supported panels
@@ -50,13 +58,87 @@ On boot the firmware identifies the panel, then:
 - **No WiFi credentials** (fresh device): it paints the setup splash (Tesserae
   logo, the AP name, the portal URL, and a join QR), brings up an open
   `Tesserae-Setup-XXXX` access point with a captive portal, and serves a form to
-  enter WiFi + MQTT settings. Saving reboots and applies them.
-- **Configured**: connect WiFi, SNTP, read the retained frame URL + config from
-  `tesserae/<device_id>/{frame/bin,config}`, download the `.bin`, and paint it
-  (a full refresh is ~20-45 s; e-paper is slow). If the frame URL is unchanged
-  since last time (SHA-256 match) the refresh is skipped. It then publishes a
-  retained heartbeat to `tesserae/<device_id>/status` and deep-sleeps for the
-  configured `sleep_interval_s`, waking to repeat.
+  enter WiFi plus a Tesserae server URL or a cloud-relay pairing code. Saving
+  reboots and applies them.
+- **Configured**: connect WiFi, ask the server for the current frame
+  (`If-None-Match` against the last ETag), download the `.bin`, and paint it
+  (a full refresh is ~20-45 s; e-paper is slow). An unchanged frame answers 304
+  and the refresh is skipped entirely. It then posts a heartbeat and
+  deep-sleeps for the interval the server hands back, waking to repeat.
+
+The wall clock comes from each response's HTTP `Date` header, which works on a
+LAN with no internet and costs nothing; SNTP is only used on the legacy MQTT
+path.
+
+### Onboarding feedback
+
+Setup narrates itself, so a headless device is never a black box:
+
+| The panel says | What happened | What to do |
+| --- | --- | --- |
+| *Wi-Fi didn't connect* | Wrong password, or the AP is gone | Rejoin the setup AP and fix it |
+| *Can't reach the server* | WiFi is fine, Tesserae is not answering | Check the URL, check the server is up |
+| *Almost done* | Reached the server, waiting on approval | Approve it in Settings -> Devices -> Discovered |
+| *Pairing with the relay* | Code submitted, waiting on the home instance | Nothing; it can take a few minutes |
+| *Connected!* | Onboarded, no frame rendered yet | Assign the device a deck or page |
+| *Battery empty* | Cell below 3.25 V; the device has hibernated | Charge it; it re-checks hourly |
+
+These cost a full refresh, so they paint only on a real **state change**, and
+only while the panel is not already showing a dashboard. Once a real frame is
+up, a single failed poll leaves it alone -- a stale dashboard is far more useful
+than an error card.
+
+### Cloud relay
+
+A panel can live somewhere the Tesserae server is not reachable from -- a
+different house, a phone hotspot, behind CGNAT -- without exposing the home
+instance to the internet. Both ends talk **outbound** to a small Cloudflare
+Worker that acts as a per-device mailbox: home seals each rendered frame and
+`PUT`s it, the panel polls and decrypts it.
+
+The relay is **zero-knowledge**. At pairing the panel and the home instance
+exchange X25519 *public* keys through it and each derive the same AES-256-GCM
+frame key locally; the key is never transmitted. The relay only ever holds
+ciphertext, two public keys and a token hash, so it can validate a poll but
+never read a dashboard. Frames decrypt **in place** in PSRAM (a second 960 KB
+buffer would be wasteful), and a failed authentication tag is never painted:
+it means the mailbox does not match this panel's key.
+
+Setup is one extra card in the setup portal: a relay URL (defaults to
+`https://relay.tesserae.ink`) and the single-use pairing code from
+*Settings -> Cloud relay -> Add a remote panel*. A relay panel needs **no**
+server URL; the portal accepts either. Pairing may span several wakes, and the
+firmware submits the code exactly once (only that route enforces the 10-minute
+expiry) and then polls until home completes the exchange.
+
+Two consecutive wakes answered `401` mean the pairing was revoked. The device
+then clears its mailbox identity, keeps the last image on the glass, and reopens
+setup so a fresh code can be typed. Two wakes rather than one is deliberate:
+unpairing costs a physical trip, so a single `401` injected by a captive portal
+should not trigger it.
+
+The wire contract is `docs/relay/contract.md` in the Tesserae repo, and it is
+authoritative for all three sides.
+
+### TLS
+
+`https://` works for both the REST server and the relay. mbedTLS is built from
+the Pico SDK's bundle against a deliberately narrow
+[`include/mbedtls_config.h`](include/mbedtls_config.h) (TLS 1.2 client, ECDHE +
+AES-GCM, no server, no DTLS, no PSK), and the trust store in
+[`include/ca_roots.h`](include/ca_roots.h) is three roots rather than a full web
+CA bundle -- this device talks to one class of host, and trusting ~150 CAs to
+reach it would be a strictly worse trade. Regenerate it with
+[`scripts/gen_ca_roots.sh`](scripts/gen_ca_roots.sh), which fingerprint-checks
+every root before writing it.
+
+Chain and hostname verification are always enforced. Certificate **dates** are
+skipped while the wall clock has never been set, because a cold-booted
+relay-only panel has no way to learn the time before its first handshake, and
+failing closed there would brick it on any network that blocks NTP. Once any
+wake sets the clock -- which survives deep sleep -- dates are checked normally.
+The dashboard does not rest on this in any case: frames are sealed under a key
+the relay never sees, so a TLS compromise reads a device token, not pixels.
 
 The 13.3" panel has two controllers split at column 600 (`CS_M` left half,
 `CS_S` right). The driver replicates the Pimoroni `inky_el133uf1` transform:
@@ -217,13 +299,18 @@ sleep: deep sleep for 900 s (wake reboots)
 | [`src/main.c`](src/main.c) | Orchestrates one wake cycle: panel detect, portal-or-connect, fetch + dedup + paint, heartbeat, deep sleep. |
 | [`src/epd_io.c`](src/epd_io.c) / [`src/panels.c`](src/panels.c) | Shared SPI1 transport, and one descriptor + `paint(variant, frame)` per panel (init + geometry + CS + the 13.3" rotate/split). Sequences from the Pimoroni Inky drivers. |
 | [`src/inky_eeprom.c`](src/inky_eeprom.c) | Bit-banged I2C reader for the model EEPROM (panel detection). |
-| [`src/config.c`](src/config.c) | Flash-backed key-value config store (WiFi/MQTT/sleep/last-frame-hash). |
+| [`src/config.c`](src/config.c) | Flash-backed config store (WiFi, server/relay identity, sleep interval, cached ETags, WiFi fast-connect hint). |
 | [`src/psram.c`](src/psram.c) | RP2350 QMI PSRAM (APS6404) bring-up for the 960 KB frame buffer. |
-| [`src/net_wifi.c`](src/net_wifi.c) / [`src/net_mqtt.c`](src/net_mqtt.c) / [`src/net_http.c`](src/net_http.c) / [`src/net_sntp.c`](src/net_sntp.c) | CYW43/lwIP WiFi, MQTT (retained frame/config + status), HTTP frame fetch, SNTP. |
+| [`src/net_httpc.c`](src/net_httpc.c) / [`src/net_tls.c`](src/net_tls.c) | The one HTTP/1.1 client, over plain TCP or TLS via lwIP altcp; streaming body sink for frames, small buffer for control JSON. TLS config, trust store and hostname verification. |
+| [`src/net_rest.c`](src/net_rest.c) | The Tesserae REST protocol: discover/register, frame + ETag, status heartbeat. |
+| [`src/relay.c`](src/relay.c) / [`src/relay_wire.c`](src/relay_wire.c) / [`src/relay_crypto.c`](src/relay_crypto.c) | Cloud relay: pairing state machine and polling; pure wire parsing and URL building; X25519 + HKDF-SHA256 + AES-256-GCM frame crypto. |
+| [`src/net_wifi.c`](src/net_wifi.c) / [`src/net_mqtt.c`](src/net_mqtt.c) / [`src/net_sntp.c`](src/net_sntp.c) | CYW43/lwIP WiFi with the fast-connect path, the legacy MQTT transport, SNTP. |
 | [`src/net_mdns.c`](src/net_mdns.c) / [`src/net_portal.c`](src/net_portal.c) | mDNS advertising and the captive provisioning portal (AP + DHCP + DNS hijack + scan + form). |
-| [`src/sleepmgr.c`](src/sleepmgr.c) | POWMAN deep sleep + wake reason + LPOSC-trimmed wall-clock. |
-| [`src/splash.c`](src/splash.c) | On-device procedural setup splash (logo + text + QR). |
-| [`src/vendor/`](src/vendor) | Third-party: DHCP/DNS servers, QR encoder. See [NOTICES.md](NOTICES.md). |
+| [`src/sleepmgr.c`](src/sleepmgr.c) | POWMAN deep sleep + wake reason + LPOSC-trimmed wall-clock + the across-wake counters. |
+| [`src/battery.c`](src/battery.c) / [`src/buttons.c`](src/buttons.c) | VSYS battery sense; the front buttons (awake-only, see the header). |
+| [`src/splash.c`](src/splash.c) | On-device procedural splashes: setup (logo + text + QR) and the status screens. |
+| [`src/vendor/`](src/vendor) | Third-party: DHCP/DNS servers, QR encoder, cJSON, Monocypher. See [NOTICES.md](NOTICES.md). |
+| [`scripts/mbedtls.py`](scripts/mbedtls.py) | Builds the Pico SDK's bundled mbedTLS + lwIP's altcp_tls glue, which the PlatformIO framework does not. |
 
 The init-sequence argument blobs in `src/panels.c` come from the Pimoroni Inky
 drivers. Do not edit the canned parameter values. To add a panel, add a
@@ -232,7 +319,13 @@ drivers. Do not edit the canned parameter values. To add a panel, add a
 Development overrides (build flags or `secrets.h` defines, all off by default):
 `DEV_SLEEP_S` (pin/disable the sleep interval; 0 = stay awake), `DEV_FORCE_REPAINT`
 (ignore the dedup), `DEV_FRAME_URL` (fetch a fixed URL), `DEV_FORCE_PORTAL`
-(force the setup portal). See [`include/secrets.example.h`](include/secrets.example.h).
+(force the setup portal). `SERVER_URL`/`PAIRING_CODE` and `RELAY_URL`/`RELAY_CODE`
+seed the two transports without going through the portal. See
+[`include/secrets.example.h`](include/secrets.example.h).
+
+The firmware version reported in the heartbeat is stamped by CI
+(`-DTESSERAE_FW_VERSION`); a local build reports `0.0.0-dev`, which the server
+reads as "never offer an update to this".
 
 ## Porting to another board
 
@@ -259,11 +352,42 @@ and never touches PSRAM or the wireless radio.
   `panels.c` would carry over (this is essentially what `tesserae-device-esp32
   -bin` already does for the 13.3").
 
+## Factory reset
+
+Hold the **A** button (leftmost, GP15) and tap RESET, then keep holding for 20
+seconds. The stored config is erased and the device reboots into the setup
+portal. Serial narrates the countdown, and releasing at any point cancels.
+
+This exists because the connectivity-failure fallback cannot cover everything:
+a device whose SSID still connects but whose server URL is wrong will never
+trip it. The hold runs before anything touches flash or the radio, so it works
+even when the rest of the cycle would not.
+
+Buttons cannot **wake** this board -- POWMAN's power-down cuts the pad domain,
+so the pad cannot sense an edge while the always-on timer wake still fires -- so
+the gesture necessarily starts from a reset.
+
 ## Not implemented
 
-Battery monitoring (the heartbeat reports `battery_*: 0`; no sense ADC is wired)
-and OTA updates. A LAN settings editor was scoped out: a deep-sleep device is not
-a persistent web server, so deployed units are reconfigured via the setup portal.
+**OTA updates.** The RP2350 has no built-in A/B slot scheme, so this needs a
+bootloader (something like `picowota`) before the signed-descriptor half is
+worth writing. The heartbeat already reports `fw_version` so the server knows
+what is running.
+
+**`always_on` / kiosk mode.** The server's `config.always_on` is parsed and
+logged but not acted on: this board has no stay-awake loop yet. Adopting it
+silently would have the Devices UI claim a behaviour the panel does not have.
+
+**Local frame cache / offline albums.** There is no SD slot, but there is ~15 MB
+of spare QSPI flash and a hardware SHA-256 block, so this is feasible; the
+blocker is that deck *navigation* is button-driven and buttons cannot wake the
+device.
+
+**Partial refresh, touch, and the protocol-v2 interaction model.** All need
+partial refresh and a digitizer. The Inky Spectra 6 has neither.
+
+A LAN settings editor was scoped out: a deep-sleep device is not a persistent
+web server, so deployed units are reconfigured via the setup portal.
 
 ## License
 

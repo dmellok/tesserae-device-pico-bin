@@ -173,9 +173,16 @@ static void paint_el133uf1(uint8_t variant, const uint8_t *frame)
 
     static const uint8_t z = 0x00;
     epd_command(cs_both, 2, S, 0x04, NULL, 0);   sleep_ms(300);
-    epd_command(cs_both, 2, S, 0x12, &z, 1);     epd_wait_ready(60000);
+    epd_command(cs_both, 2, S, 0x12, &z, 1);
+    /* Confirm the refresh actually STARTED before powering the panel off. A
+     * dropped DRF (the failure mode the 300 ms D/C setup exists to prevent)
+     * otherwise gets POF'd immediately and leaves the glass blank, while the
+     * log claims success. 8 s of start budget is generous: this panel asserts
+     * BUSY within a few hundred ms of accepting DRF. */
+    epd_refresh_t rr = epd_wait_refresh(8000, 60000);
     epd_command(cs_both, 2, S, 0x02, &z, 1);     sleep_ms(300);
-    printf("epd: refresh done\n");
+    if (rr != EPD_REFRESH_OK)
+        printf("epd: WARNING refresh did not complete (%d); glass may be stale\n", (int)rr);
 }
 
 /* ===================== Spectra 6 small (E673 7.3", E640 4.0") ===================== */
@@ -224,10 +231,12 @@ static void paint_spectra6_small(int width, int height, const uint8_t tres[4],
     static const uint8_t z = 0x00;
     epd_command(&cs8, 1, S, 0x04, NULL, 0);    sleep_ms(300);
     epd_command(&cs8, 1, S, 0x06, btst2b, 4);
-    epd_command(&cs8, 1, S, 0x12, &z, 1);      epd_wait_ready(drf_timeout_ms);
+    epd_command(&cs8, 1, S, 0x12, &z, 1);
+    epd_refresh_t rr = epd_wait_refresh(8000, drf_timeout_ms);
     epd_command(&cs8, 1, S, 0x02, &z, 1);      sleep_ms(300);
     if (psr_rewrite) { epd_command(&cs8, 1, S, 0x00, psr_rewrite, 2); sleep_ms(300); }
-    printf("epd: refresh done\n");
+    if (rr != EPD_REFRESH_OK)
+        printf("epd: WARNING refresh did not complete (%d); glass may be stale\n", (int)rr);
 }
 
 static void paint_e673(uint8_t variant, const uint8_t *frame)
@@ -301,9 +310,11 @@ static void paint_ac073(uint8_t variant, const uint8_t *frame)
 
     static const uint8_t z = 0x00;
     epd_command(&cs8, 1, S, 0x04, NULL, 0);   sleep_ms(400);
-    epd_command(&cs8, 1, S, 0x12, &z, 1);     epd_wait_ready(50000);
+    epd_command(&cs8, 1, S, 0x12, &z, 1);
+    epd_refresh_t rr = epd_wait_refresh(8000, 50000);
     epd_command(&cs8, 1, S, 0x02, &z, 1);     sleep_ms(400);
-    printf("epd: refresh done\n");
+    if (rr != EPD_REFRESH_OK)
+        printf("epd: WARNING refresh did not complete (%d); glass may be stale\n", (int)rr);
 }
 
 /* ===================== UC8159, 7-colour (untested) ===================== */
@@ -347,9 +358,11 @@ static void paint_uc8159(uint8_t variant, const uint8_t *frame)
     printf("epd: frame streamed, refreshing...\n");
 
     epd_command(&cs8, 1, S, 0x04, NULL, 0);   sleep_ms(200);
-    epd_command(&cs8, 1, S, 0x12, NULL, 0);   epd_wait_ready(40000);
+    epd_command(&cs8, 1, S, 0x12, NULL, 0);
+    epd_refresh_t rr = epd_wait_refresh(8000, 40000);
     epd_command(&cs8, 1, S, 0x02, NULL, 0);   sleep_ms(200);
-    printf("epd: refresh done\n");
+    if (rr != EPD_REFRESH_OK)
+        printf("epd: WARNING refresh did not complete (%d); glass may be stale\n", (int)rr);
 }
 
 /* ===================== registry ===================== */

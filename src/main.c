@@ -16,13 +16,14 @@
 #include <stdlib.h>
 #include "pico/stdlib.h"
 #include "pico/sha256.h"
+#include "hardware/watchdog.h"
 
 #include "inky_eeprom.h"
 #include "panels.h"
 #include "net_wifi.h"
 #include "net_mqtt.h"
 #include "net_rest.h"
-#include "net_http.h"
+#include "net_httpc.h"
 #include "net_sntp.h"
 #include "net_portal.h"
 #include "net_mdns.h"
@@ -30,8 +31,12 @@
 #include "psram.h"
 #include "sleepmgr.h"
 #include "battery.h"
-
-#define FW_VERSION  "0.2.0"
+#include "buttons.h"
+#include "splash.h"
+#include "fw_version.h"
+#include "relay.h"
+#include "relay_crypto.h"
+#include "net_tls.h"
 
 /* Consecutive cycles that fail to reach WiFi/the server before the firmware
  * re-opens the setup portal (so a wrong WiFi password or server URL can be fixed
@@ -39,6 +44,43 @@
 #ifndef MAX_CONNECT_FAILS
 #define MAX_CONNECT_FAILS  3
 #endif
+
+/* Low-battery hibernation thresholds, in VSYS millivolts (see battery.h: on
+ * this board VSYS is the cell, and reads ~4.7 V whenever USB is attached).
+ *
+ * A single LiPo cell is essentially empty at 3.3 V, and driving a full e-paper
+ * refresh below that browns out mid-waveform, which leaves the glass in a
+ * half-written state that looks like a hardware fault. Stopping at 3.25 V keeps
+ * enough margin for the one goodbye refresh. The resume threshold is well above
+ * it so a cell hovering at the line does not oscillate between hibernating and
+ * waking, which would drain it faster than simply staying down. */
+#define BATTERY_GOODBYE_MV   3250u
+#define BATTERY_RESUME_MV    3450u
+
+/* How long to hibernate on a flat cell before re-checking.
+ *
+ * tesserae-device-firmware powers down with NO wake source here, on the
+ * reasoning that a flat cell should draw nothing at all. This board diverges
+ * deliberately: POWMAN's power-down cannot be interrupted by plugging in USB
+ * (the pad domain is off), so an indefinite hibernate means a charged device
+ * stays dark until someone finds the reset button. An hourly wake costs a few
+ * tens of milliseconds of ADC read, which is nothing against a dead battery,
+ * and makes "plug it in and walk away" work. */
+#define BATTERY_RECHECK_S    3600
+
+/* How long BTN_A must be held during the boot window to wipe the config.
+ * Long enough that it cannot happen by accident (the device is usually being
+ * handled when it is reset), short enough to be a believable instruction. */
+#define FACTORY_RESET_HOLD_MS  20000
+
+/* Whether status splashes may paint this boot. See maybe_show_status(). */
+static bool s_status_splash_allowed;
+
+/* Whether a status splash has already been painted this boot. One diagnosis per
+ * wake: the cycle functions know the specific cause (wrong password, server
+ * down, waiting on approval) and paint it, and run_cycle's generic fallback
+ * must not then paint over it with a vaguer -- and wrong -- message. */
+static bool s_status_splash_painted;
 
 /* Optional startup delay so a serial monitor attached right after reset/wake can
  * catch the boot logs. It is wasted awake time on every (battery) wake, so the
@@ -55,6 +97,130 @@
 #    include "secrets.h"
 #  endif
 #endif
+
+/* ---------- onboarding feedback ---------- */
+
+/* Paint a status screen, if it is worth the refresh.
+ *
+ * Two gates, and both matter:
+ *
+ *   1. State change. What is on the glass lives in an always-on scratch word,
+ *      so a failure that repeats every wake repaints nothing. Without this a
+ *      device with a wrong WiFi password would burn a 20-45 s refresh a minute,
+ *      forever.
+ *
+ *   2. Only when the panel is not already earning its keep. Once a real frame
+ *      has been painted, a single failed poll must NOT replace the user's
+ *      dashboard with an error card -- transient failures are normal and the
+ *      stale dashboard is far more useful than "can't reach the server". After
+ *      a cold boot (which includes the reboot out of the setup portal) there is
+ *      nothing to protect, so the status screens are exactly what is wanted.
+ *
+ *   3. At most one per boot. Two different diagnoses in one wake would mean two
+ *      full refreshes back to back -- around 90 s -- and the user would be left
+ *      looking at whichever painted last, which is the LESS specific one.
+ *
+ * The result: setup narrates itself, and steady-state operation stays quiet. */
+static void maybe_show_status(const panel_t *panel, uint8_t variant,
+                              splash_state_t st)
+{
+    if (panel == NULL || !s_status_splash_allowed || s_status_splash_painted) return;
+    if ((splash_state_t)sleep_splash_state() == st) {
+        s_status_splash_painted = true;   /* already correct on the glass */
+        return;
+    }
+    splash_show_status(panel, variant, st);
+    sleep_set_splash_state((uint32_t)st);
+    s_status_splash_painted = true;
+}
+
+/* Record that a real frame is on the glass, so the next failure is visible. */
+static void note_frame_painted(void)
+{
+    sleep_set_splash_state((uint32_t)SPLASH_NONE);
+}
+
+/* ---------- low-battery goodbye ---------- */
+
+/* Decide whether the cell can support another cycle, and act on it.
+ *
+ * On a flat cell: paint the goodbye once, then hibernate; a wake that finds it
+ * still flat hibernates again without repainting. On recovery, the goodbye is
+ * still on the glass and the server's frame has NOT changed -- so the next poll
+ * would 304 and leave "Battery empty" up indefinitely. Clearing the cached ETag
+ * and hash here is what forces exactly one real repaint.
+ *
+ * Does not return when the battery is flat. */
+static void battery_goodbye_check(const panel_t *panel, uint8_t variant)
+{
+    uint32_t mv = battery_mv();
+    if (mv == 0) return;   /* never sampled / no sense: do not act on a non-reading */
+
+    bool showing = (sleep_splash_state() == (uint32_t)SPLASH_BATTERY_EMPTY);
+    uint32_t threshold = showing ? BATTERY_RESUME_MV : BATTERY_GOODBYE_MV;
+    if (mv >= threshold) {
+        if (showing) {
+            printf("battery: recovered (%lu mV); forcing one repaint\n",
+                   (unsigned long)mv);
+            /* Every transport's conditional-fetch key has to go, not just the
+             * REST one: whichever is in use would otherwise answer 304 (the
+             * server's frame has not changed while we were asleep) and leave
+             * "Battery empty" on the glass indefinitely. */
+            config_set_frame_etag("");
+            config_set_last_hash("");
+            config_set_relay_etag("");
+            sleep_set_splash_state((uint32_t)SPLASH_NONE);
+            config_save();     /* radio is still down here, so this is safe */
+        }
+        return;
+    }
+
+    if (!showing) {
+        printf("battery: empty (%lu mV); painting goodbye and hibernating\n",
+               (unsigned long)mv);
+        splash_show_status(panel, variant, SPLASH_BATTERY_EMPTY);
+        sleep_set_splash_state((uint32_t)SPLASH_BATTERY_EMPTY);
+    } else {
+        printf("battery: still empty (%lu mV); hibernating\n", (unsigned long)mv);
+    }
+    sleep_deep_ms((uint64_t)BATTERY_RECHECK_S * 1000ull);   /* does not return */
+}
+
+/* ---------- factory reset ---------- */
+
+static void factory_reset_tick(unsigned elapsed)
+{
+    printf("buttons: A held %us/%us -- release to cancel the factory reset\n",
+           elapsed / 1000u, (unsigned)FACTORY_RESET_HOLD_MS / 1000u);
+}
+
+/* Wipe the stored config if BTN_A is held through the boot window.
+ *
+ * This is the only escape hatch from a device that cannot reach its portal --
+ * a saved-but-wrong server URL on a network whose SSID still connects, say,
+ * where the connectivity-failure fallback never fires. It runs BEFORE anything
+ * touches WiFi or flash, so it works even when the rest of the cycle would not.
+ *
+ * Buttons cannot wake this board from deep sleep (see buttons.h), so the
+ * gesture is: hold A, tap RESET, keep holding. Does not return if it fires. */
+static void maybe_factory_reset(void)
+{
+    if (!button_down(BTN_A)) return;
+
+    printf("buttons: A is down -- hold %us for a factory reset (release to cancel)\n",
+           (unsigned)FACTORY_RESET_HOLD_MS / 1000u);
+    if (!button_held_for(BTN_A, FACTORY_RESET_HOLD_MS, factory_reset_tick)) {
+        printf("buttons: released; factory reset cancelled\n");
+        return;
+    }
+
+    printf("buttons: FACTORY RESET -- erasing config, rebooting into setup\n");
+    printf(config_erase() ? "config: erased\n" : "config: ERASE FAILED\n");
+    sleep_set_splash_state((uint32_t)SPLASH_NONE);
+    sleep_force_cold_boot();
+    watchdog_reboot(0, 0, 0);
+    while (true) tight_loop_contents();
+}
 
 /* 64-hex-char SHA-256 of a string, via the RP2350 hardware SHA block. */
 static void sha256_hex(const char *s, char out[65])
@@ -83,7 +249,10 @@ static bool do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
     bool           cfg_dirty  = false;
     char           new_hash[65] = {0};
 
-    bool wifi_ok = config_has_wifi() && wifi_connect(c->wifi_ssid, c->wifi_pass, 20000);
+    bool wifi_dirty = false;
+    bool wifi_ok = config_has_wifi() &&
+                   wifi_connect(c->wifi_ssid, c->wifi_pass, 20000, &wifi_dirty);
+    if (wifi_dirty) cfg_dirty = true;
     if (wifi_ok) {
         mdns_advertise();  /* discoverable as tesserae-pico-XXXX.local while awake */
         sntp_sync(8000);   /* best-effort; never blocks the cycle */
@@ -172,6 +341,11 @@ static bool do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
         wifi_stop();   /* radio down before the slow refresh + flash write */
     } else if (!config_has_wifi()) {
         printf("wifi: no SSID configured; skipping (portal comes in a later phase)\n");
+    } else {
+        /* Failed to associate. wifi_connect leaves the CYW43 driver up on
+         * failure, and the paint + config_save below both need it down. */
+        wifi_stop();
+        maybe_show_status(panel, variant, SPLASH_WIFI_FAILED);
     }
 
     /* Decide what to paint:
@@ -191,9 +365,17 @@ static bool do_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
         printf("painting downloaded frame (this takes ~20-45s)...\n");
         panel->paint(variant, frame);
         if (new_hash[0]) { config_set_last_hash(new_hash); cfg_dirty = true; }
+        note_frame_painted();
         printf("done.\n");
     } else if (c->last_hash[0] != '\0') {
         printf("paint: no frame this cycle; keeping last image\n");
+    } else if (s_status_splash_painted) {
+        /* A status screen already went on the glass this wake (the Wi-Fi
+         * failure above, most likely). Painting stripes over it would cost a
+         * second 20-45 s refresh AND destroy the diagnosis -- and because the
+         * recorded splash state would still say WIFI_FAILED, no later wake
+         * would ever repaint the message. Permanent stripes, no explanation. */
+        printf("paint: status screen is up; skipping the stripe fallback\n");
     } else {
         printf("painting test stripes (no frame yet; this takes ~20-45s)...\n");
         panel->paint(variant, NULL);
@@ -326,10 +508,22 @@ static bool do_cycle_rest(const panel_t *panel, uint8_t variant, size_t psram_sz
     bool           reached    = false;   /* did we reach the server this cycle? */
     char           new_etag[80] = {0};
 
-    if (!config_has_wifi() || !wifi_connect(c->wifi_ssid, c->wifi_pass, 20000)) {
+    bool wifi_dirty = false;
+    if (!config_has_wifi() ||
+        !wifi_connect(c->wifi_ssid, c->wifi_pass, 20000, &wifi_dirty)) {
         printf("rest: wifi unavailable; skipping cycle\n");
+        /* wifi_connect leaves the CYW43 driver INITIALISED on failure -- only
+         * wifi_stop() tears it down -- so the radio is still live here. Both a
+         * flash erase (interrupts off for ~100 ms, XIP disconnected) and a
+         * 20-45 s panel refresh have to wait until it is not. */
+        wifi_stop();
+        if (wifi_dirty) config_save();
+        /* Say so on the glass: a wrong password is the single most common setup
+         * failure, and it is invisible without a serial cable. */
+        maybe_show_status(panel, variant, SPLASH_WIFI_FAILED);
         return false;   /* main() counts this toward the portal fallback */
     }
+    if (wifi_dirty) cfg_dirty = true;
     mdns_advertise();
     /* No SNTP on the REST path: the wall clock is set from each response's HTTP
      * Date header (works on a LAN with no internet, and saves ~8s/cycle). */
@@ -352,6 +546,14 @@ static bool do_cycle_rest(const panel_t *panel, uint8_t variant, size_t psram_sz
              * consumed by this boot's sleep, so there is nothing to persist on
              * the common "waiting for admin" retry: avoid the flash wear. */
             wifi_stop();
+            /* "Waiting for the admin to click Register" is NOT a failure, and
+             * saying so is the difference between a user who waits and a user
+             * who starts re-flashing. A server we could not reach at all is a
+             * different message with a different fix. */
+            maybe_show_status(panel, variant,
+                              reached ? SPLASH_AWAITING_APPROVAL
+                                      : SPLASH_SERVER_UNREACHABLE);
+            if (cfg_dirty) config_save();
             return reached;   /* reached==false (server unreachable) feeds the fallback */
         }
         if (boot_dirty) cfg_dirty = true;
@@ -415,6 +617,13 @@ static bool do_cycle_rest(const panel_t *panel, uint8_t variant, size_t psram_sz
                 config_set_sleep_s(so.sleep_interval_s);
                 cfg_dirty = true;
             }
+            /* Absent tz means "keep what we have", not "clear it": an older
+             * server simply never sends the key. */
+            if (so.tz[0] && strcmp(so.tz, config_get()->tz) != 0) {
+                printf("rest: adopting timezone '%s'\n", so.tz);
+                config_set_tz(so.tz);
+                cfg_dirty = true;
+            }
             if (so.next_poll_s > 0) config_set_sleep_s(so.next_poll_s);   /* drives this sleep */
         } else {
             printf("rest: status post failed (%d)\n", ss);
@@ -424,7 +633,8 @@ static bool do_cycle_rest(const panel_t *panel, uint8_t variant, size_t psram_sz
         }
     }
 
-    wifi_stop();   /* radio down before the slow refresh + flash write */
+    net_tls_deinit();   /* frees the parsed root store if this server was https */
+    wifi_stop();        /* radio down before the slow refresh + flash write */
 
 #ifdef DEV_SLEEP_S
     config_set_sleep_s(DEV_SLEEP_S);   /* dev override: wins over server next_poll_s */
@@ -432,7 +642,13 @@ static bool do_cycle_rest(const panel_t *panel, uint8_t variant, size_t psram_sz
 
     /* Paint decision (radio down). Keep the current image on a transient miss if
      * we have ever painted a frame (last_frame_etag set). */
-    if (skip_paint) {
+    if (skip_paint && fs == REST_NO_CONTENT && config_get()->last_frame_etag[0] == '\0') {
+        /* Onboarded, but the server has not rendered anything for us yet. This
+         * is the last step of setup and deserves closure: without it the panel
+         * sits on the setup splash and looks like it never finished. */
+        printf("paint: onboarded, no frame rendered yet\n");
+        maybe_show_status(panel, variant, SPLASH_CONNECTED_NO_FRAME);
+    } else if (skip_paint) {
         printf("paint: skipped (unchanged / none)\n");
     } else if (panel == NULL) {
         /* no driver */
@@ -440,6 +656,7 @@ static bool do_cycle_rest(const panel_t *panel, uint8_t variant, size_t psram_sz
         printf("painting downloaded frame (this takes ~20-45s)...\n");
         panel->paint(variant, frame);
         if (new_etag[0]) { config_set_frame_etag(new_etag); cfg_dirty = true; }
+        note_frame_painted();
         printf("done.\n");
     } else if (config_get()->last_frame_etag[0] != '\0') {
         printf("paint: no frame this cycle; keeping last image\n");
@@ -456,6 +673,176 @@ static bool do_cycle_rest(const panel_t *panel, uint8_t variant, size_t psram_sz
     return reached;
 }
 
+/*
+ * One Tesserae cycle over the cloud relay (used when a relay pairing exists, or
+ * a pairing is in flight). The relay is an ALTERNATIVE to the direct-REST path,
+ * for a panel that cannot see the home instance at all; see relay.h.
+ *
+ * Shape mirrors do_cycle_rest: bootstrap if needed, conditional GET for the
+ * frame, POST status, adopt config, drop the radio, then paint. The differences
+ * are that every frame arrives sealed (and is decrypted in place in PSRAM), and
+ * that config comes from a mailbox document rather than the status response.
+ */
+static bool do_cycle_relay(const panel_t *panel, uint8_t variant, size_t psram_sz)
+{
+    const config_t *c = config_get();
+    bool cfg_dirty = false;
+    bool reached   = false;
+
+    /* Report the panel in its native landscape orientation, as the REST path
+     * does: the pico_bin renderer packs 1600x1200 for the 13.3". */
+    uint16_t pw = panel ? panel->width : 0, ph = panel ? panel->height : 0;
+    if (pw < ph) { uint16_t t = pw; pw = ph; ph = t; }
+
+    bool wifi_dirty = false;
+    if (!config_has_wifi() ||
+        !wifi_connect(c->wifi_ssid, c->wifi_pass, 20000, &wifi_dirty)) {
+        printf("relay: wifi unavailable; skipping cycle\n");
+        wifi_stop();                     /* still initialised on failure */
+        if (wifi_dirty) config_save();
+        maybe_show_status(panel, variant, SPLASH_WIFI_FAILED);
+        return false;
+    }
+    if (wifi_dirty) cfg_dirty = true;
+
+    /* 1. Finish pairing if it is still in flight. This can span several wakes:
+     * the operator's code is submitted once, then polled until the home
+     * instance completes the exchange on its side. */
+    if (!relay_ready()) {
+        relay_pair_result_t pr = relay_pair_step(pw, ph, &cfg_dirty);
+        net_tls_deinit();   /* frees the parsed root store before we sleep/paint */
+        wifi_stop();
+        if (cfg_dirty) config_save();
+        switch (pr) {
+        case RELAY_PAIR_DONE:
+            printf("relay: pairing complete; frames start next wake\n");
+            return true;
+        case RELAY_PAIR_WAITING:
+            maybe_show_status(panel, variant, SPLASH_RELAY_PAIRING);
+            return true;   /* we reached the relay: not a connectivity failure */
+        case RELAY_PAIR_EXPIRED:
+            /* The code is gone and single-use, so no amount of retrying helps.
+             * Reopen setup, which is the only place a fresh one can be typed. */
+            printf("relay: pairing expired; reopening setup\n");
+            portal_run(panel, variant);   /* does not return */
+            return true;
+        default:
+            maybe_show_status(panel, variant, SPLASH_SERVER_UNREACHABLE);
+            return false;
+        }
+    }
+
+    /* 2. Sealed frame, with If-None-Match against the last one we painted.
+     * The buffer must hold the SEALED size: the nonce and GCM tag ride along
+     * and the plaintext starts 12 bytes in, decrypted in place. */
+    const uint8_t *frame = NULL;
+    size_t frame_len = 0;
+    bool skip_paint = false;
+    uint8_t *sram_buf = NULL;
+    relay_frame_result_t fr = RELAY_FRAME_ERROR;
+
+    if (panel != NULL) {
+        uint32_t need = panel_frame_bytes(panel) + RELAY_SEAL_OVERHEAD;
+        uint8_t *buf = NULL;
+        if (need <= 256u * 1024) buf = sram_buf = malloc(need);
+        if (buf == NULL && psram_sz >= need) buf = (uint8_t *)PSRAM_XIP_BASE;
+        if (buf == NULL) {
+            printf("relay: no buffer for %u sealed bytes\n", (unsigned)need);
+        } else {
+            fr = relay_fetch_frame(buf, need, &frame, &frame_len, &cfg_dirty);
+            if (fr != RELAY_FRAME_ERROR) reached = true;
+            if (fr == RELAY_FRAME_UNCHANGED || fr == RELAY_FRAME_NONE) {
+                printf("relay: %s; skipping paint\n",
+                       fr == RELAY_FRAME_UNCHANGED ? "frame unchanged (304)"
+                                                   : "nothing published yet (204)");
+                skip_paint = true;
+                frame = NULL;
+            } else if (fr == RELAY_FRAME_NEW) {
+                /* Length is the real integrity check, not the relay's
+                 * X-Tesserae-* headers: a frame that decrypts to the wrong size
+                 * is for a different panel and would paint as a diagonal smear. */
+                uint32_t want = panel_frame_bytes(panel);
+                if (frame_len != want) {
+                    printf("relay: decrypted frame is %u bytes, panel wants %u; dropping\n",
+                           (unsigned)frame_len, (unsigned)want);
+                    frame = NULL;
+                }
+            } else {
+                frame = NULL;
+            }
+        }
+    }
+
+    /* 3. Telemetry, then the config document (which the status response tells
+     * us whether we even need to fetch). */
+    char ip[16];
+    wifi_get_ip(ip, sizeof ip);
+    if (relay_post_status(wifi_rssi(), ip, pw, ph, FW_VERSION)) reached = true;
+    relay_sync_config(&cfg_dirty);
+
+    /* A pairing the relay has disowned twice running is not coming back; keep
+     * the current image and reopen setup so a fresh code can be typed.
+     *
+     * cfg_dirty must be forced: on a wake where every request 401'd, nothing
+     * else dirtied the config, so without this the wipe would live only in RAM
+     * and a power cycle before the operator finishes the form would restore the
+     * dead pairing and start the two-wake revocation over again. */
+    bool revoked = relay_pairing_revoked();
+    if (revoked) {
+        relay_forget_revoked_pairing();
+        cfg_dirty = true;
+    }
+
+    net_tls_deinit();
+    wifi_stop();   /* radio down before the slow refresh + flash write */
+
+#ifdef DEV_SLEEP_S
+    config_set_sleep_s(DEV_SLEEP_S);
+#endif
+
+    if (fr == RELAY_FRAME_NONE && config_get()->relay_etag[0] == '\0') {
+        /* Paired, but home has not published a frame to the mailbox yet. Tested
+         * BEFORE the generic skip_paint (which a 204 also sets), or setup never
+         * gets its closure: the panel would sit on the portal's "Setup mode"
+         * splash with no sign that pairing actually succeeded. Mirrors the REST
+         * path's REST_NO_CONTENT branch. */
+        printf("paint: paired, no frame published yet\n");
+        maybe_show_status(panel, variant, SPLASH_CONNECTED_NO_FRAME);
+    } else if (skip_paint) {
+        printf("paint: skipped (unchanged / none)\n");
+    } else if (frame != NULL) {
+        printf("painting relay frame (this takes ~20-45s)...\n");
+        panel->paint(variant, frame);
+        relay_commit_frame(&cfg_dirty);
+        note_frame_painted();
+        printf("done.\n");
+    } else if (revoked) {
+        /* relay_forget_revoked_pairing() just blanked relay_etag, so the
+         * "keeping last image" test below would read as "never painted" and
+         * throw a 45 s onboarding refresh onto the glass moments before the
+         * portal paints its own setup screen over it. Leave the dashboard up. */
+        printf("paint: pairing revoked; keeping last image until setup\n");
+    } else if (config_get()->relay_etag[0] != '\0') {
+        printf("paint: no frame this cycle; keeping last image\n");
+    } else if (reached) {
+        /* Only when we actually got an answer from the relay. Without the
+         * `reached` test a freshly paired panel on a network that cannot see
+         * the relay would paint "Connected! Waiting for your first frame" --
+         * the opposite of the truth -- and, being a status paint, would then
+         * suppress run_cycle's correct "can't reach the server" message. */
+        maybe_show_status(panel, variant, SPLASH_CONNECTED_NO_FRAME);
+    }
+
+    if (cfg_dirty) printf(config_save() ? "config: saved\n" : "config: SAVE FAILED\n");
+    if (sram_buf != NULL) free(sram_buf);
+
+    if (revoked) {
+        printf("relay: reopening setup for a fresh pairing code\n");
+        portal_run(panel, variant);   /* does not return */
+    }
+    return reached;
+}
+
 /* Run one cycle on the active transport, tracking connectivity. After
  * MAX_CONNECT_FAILS consecutive failures to reach WiFi/the server, re-open the
  * setup portal so a bad WiFi password or server URL can be corrected without a
@@ -463,19 +850,40 @@ static bool do_cycle_rest(const panel_t *panel, uint8_t variant, size_t psram_sz
  * deep-sleep reboots between cycles). */
 static void run_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
 {
+    /* One status splash per cycle, not per boot: in production every cycle IS a
+     * boot, but the dev loop (sleep_s <= 0) runs many cycles per power session
+     * and would otherwise be stuck with whatever the first one decided. */
+    s_status_splash_painted = false;
+
     /* Sample VSYS now, before either transport brings the radio up (the sense
      * pin GP43 is shared with the wireless). The heartbeat reads the cache. */
     battery_sample();
     printf("battery: %lu mV (~%d%%) [raw=%u]\n",
            (unsigned long)battery_mv(), battery_pct(), battery_raw());
 
-    bool reached = config_has_server() ? do_cycle_rest(panel, variant, psram_sz)
-                                       : do_cycle(panel, variant, psram_sz);
+    /* Transport selection, most specific first. A relay pairing (or a code in
+     * flight) wins because a relay panel deliberately has NO server_url -- it
+     * cannot see the home instance, which is the entire reason it is on the
+     * relay. Then REST, then the legacy MQTT path. */
+    bool reached;
+    if (config_has_relay() && (relay_ready() || relay_pairing_pending()))
+        reached = do_cycle_relay(panel, variant, psram_sz);
+    else if (config_has_server())
+        reached = do_cycle_rest(panel, variant, psram_sz);
+    else
+        reached = do_cycle(panel, variant, psram_sz);
     if (reached) { sleep_failcount_reset(); return; }
 
     sleep_failcount_inc();
     uint32_t fails = sleep_failcount();
     printf("net: connectivity failure %u/%u\n", (unsigned)fails, MAX_CONNECT_FAILS);
+    /* We got onto WiFi but never reached the server (a wrong URL, or the server
+     * is down). Distinct from a WiFi failure and distinct from waiting on the
+     * admin, because the fix is different in each case. This is the FALLBACK:
+     * the cycle functions above paint the more specific message when they know
+     * one, and maybe_show_status's one-per-cycle rule is what stops this
+     * painting over it. */
+    maybe_show_status(panel, variant, SPLASH_SERVER_UNREACHABLE);
     if (fails >= MAX_CONNECT_FAILS) {
         printf("net: too many failures; re-opening setup portal\n");
         sleep_failcount_reset();
@@ -488,7 +896,13 @@ int main(void)
 {
     stdio_init_all();
     if (DEV_BOOT_LOG_DELAY_MS) sleep_ms(DEV_BOOT_LOG_DELAY_MS);   /* dev-only; 0 in prod */
-    printf("\ntesserae-device-pico-bin\n");
+    printf("\ntesserae-device-pico-bin " FW_VERSION "\n");
+
+    /* Before anything else touches flash or the radio: the factory-reset hold.
+     * It has to work on a device whose config is what is broken, so it must not
+     * depend on config, WiFi or the panel being usable. */
+    buttons_init();
+    maybe_factory_reset();
 
     /* Phase 4a (WIP): bring up PSRAM (needed only for frames too big for SRAM,
      * e.g. the 13.3"). Returns 0 on boards without it. The self-test is a
@@ -533,6 +947,16 @@ int main(void)
     config_set_pairing_code(PAIRING_CODE);   /* optional; blank = discover/claim */
 #  endif
 #endif
+#ifdef RELAY_CODE
+    /* A relay code seeds a pairing attempt on the next cycle. The URL defaults
+     * to the hosted relay so a bench test only has to define the code. */
+#  ifdef RELAY_URL
+    config_set_relay_url(RELAY_URL);
+#  else
+    config_set_relay_url(RELAY_DEFAULT_URL);
+#  endif
+    config_set_relay_code(RELAY_CODE);
+#endif
     bool changed = !had_config ||
                    memcmp(&before, config_get(), sizeof(config_t)) != 0;
     if (changed) {
@@ -571,10 +995,25 @@ int main(void)
      * the always-on wall-clock timer (it survives deep sleep once SNTP sets it). */
     sleep_timer_init();
     sleep_calibrate_lposc();   /* one-time LPOSC trim (cold boot only) for accurate sleep */
-    wake_reason_t wake = sleep_wake_reason();
+    wake_reason_t wake = sleep_wake_reason();   /* also clears the across-wake counters on a cold boot */
     printf("wake: %s (boot #%u)\n",
            wake == WAKE_TIMER ? "timer" : "cold", (unsigned)sleep_boot_count());
-    if (wake == WAKE_COLD) sleep_failcount_reset();   /* fresh power-on: clear backoff */
+
+    /* Status splashes may paint on a cold boot (which includes the reboot out of
+     * the setup portal), or while the device has never shown a real frame. Once
+     * a dashboard is up, a timer wake must not replace it with an error card
+     * over one failed poll. See maybe_show_status(). */
+    s_status_splash_allowed = (wake == WAKE_COLD) ||
+                              (config_get()->last_frame_etag[0] == '\0' &&
+                               config_get()->last_hash[0] == '\0' &&
+                               config_get()->relay_etag[0] == '\0');
+
+    /* Battery gate, before the cycle spends any power on radio or refresh. Does
+     * not return on a flat cell. Reads the sample taken in run_cycle... which
+     * has not happened yet, so take one here: the pin is free (the radio has
+     * never been up this boot) and battery_sample() is idempotent. */
+    battery_sample();
+    battery_goodbye_check(panel, variant);
 
 #ifdef DEV_FORCE_PORTAL
     printf("dev: forcing provisioning portal\n");

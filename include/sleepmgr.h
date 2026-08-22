@@ -32,6 +32,15 @@ void sleep_calibrate_lposc(void);
 /* Why this boot happened. Latches on first call (and records the boot count). */
 wake_reason_t sleep_wake_reason(void);
 
+/* Make the NEXT boot report WAKE_COLD.
+ *
+ * A watchdog_reboot() out of the setup portal (or a factory reset) leaves the
+ * deep-sleep wake marker in place, so the reboot would otherwise look like a
+ * routine timer wake. It is not: the device has just been reconfigured, nothing
+ * on the glass can be trusted, and every across-wake counter should start over.
+ * Call this immediately before rebooting. */
+void sleep_force_cold_boot(void);
+
 /* Boots since the last cold start (1 on a cold boot). */
 uint32_t sleep_boot_count(void);
 
@@ -41,6 +50,23 @@ uint32_t sleep_boot_count(void);
 uint32_t sleep_failcount(void);
 void     sleep_failcount_inc(void);
 void     sleep_failcount_reset(void);
+
+/* What the panel is currently showing (a splash_state_t, stored as a plain
+ * integer so sleepmgr.h does not have to know about splash.h). Kept in an
+ * always-on scratch word so it survives the deep sleep between cycles, which is
+ * what lets main.c repaint a status screen only on a real STATE CHANGE instead
+ * of burning a 20-45 s refresh on every retry. Reset to 0 (SPLASH_NONE) on a
+ * cold boot, since a power cycle may well have changed what is on the glass. */
+uint32_t sleep_splash_state(void);
+void     sleep_set_splash_state(uint32_t state);
+
+/* Consecutive wakes whose cloud-relay device-token requests were answered 401.
+ * Lives here for the same reason as the failure counter: "across wakes" means
+ * "across deep sleeps", and this must not cost a flash write on what is meant
+ * to be a rare path. A cold boot clears it, which errs toward staying paired. */
+uint32_t sleep_relay_authfail(void);
+void     sleep_relay_authfail_inc(void);
+void     sleep_relay_authfail_reset(void);
 
 /* Set the wall-clock from an epoch (seconds). Called by the SNTP layer. */
 void sleep_set_epoch(uint32_t sec);

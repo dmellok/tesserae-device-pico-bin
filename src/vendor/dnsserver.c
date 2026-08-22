@@ -47,8 +47,13 @@ static void dns_socket_free(struct udp_pcb **udp) {
 }
 
 static int dns_socket_bind(struct udp_pcb **udp, uint32_t ip, uint16_t port) {
+    /* With LWIP_IPV6 on, ip_addr_t is a tagged union and IP4_ADDR takes the
+     * ip4_addr_t half; the tag has to be set explicitly or udp_bind reads a
+     * v4 address out of a pcb it believes is v6. The captive portal is IPv4
+     * only, so pinning the type here is correct rather than a workaround. */
     ip_addr_t addr;
-    IP4_ADDR(&addr, ip >> 24 & 0xff, ip >> 16 & 0xff, ip >> 8 & 0xff, ip & 0xff);
+    IP4_ADDR(ip_2_ip4(&addr), ip >> 24 & 0xff, ip >> 16 & 0xff, ip >> 8 & 0xff, ip & 0xff);
+    IP_SET_TYPE_VAL(addr, IPADDR_TYPE_V4);
     err_t err = udp_bind(*udp, &addr, port);
     if (err != ERR_OK) {
         ERROR_printf("dns failed to bind to port %u: %d", port, err);
@@ -197,7 +202,11 @@ static void dns_server_process(void *arg, struct udp_pcb *upcb, struct pbuf *p, 
 
     *answer_ptr++ = 0;
     *answer_ptr++ = 4; // length
-    memcpy(answer_ptr, &d->ip.addr, 4); // use our address
+    /* ip_2_ip4() rather than d->ip.addr: with LWIP_IPV6 on, ip_addr_t becomes a
+     * tagged union and the bare .addr member no longer exists. This record is an
+     * A record by construction (the portal AP is IPv4-only), so taking the v4
+     * half explicitly is both correct and what the code always meant. */
+    memcpy(answer_ptr, &ip_2_ip4(&d->ip)->addr, 4); // use our address
     answer_ptr += 4;
 
     dns_hdr->flags = lwip_htons(

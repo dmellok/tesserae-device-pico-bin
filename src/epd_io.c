@@ -55,6 +55,40 @@ void epd_wait_ready(uint32_t timeout_ms)
     printf("epd: ready after %ums (busy=%d)\n", (unsigned)ms, gpio_get(EPD_PIN_BUSY));
 }
 
+epd_refresh_t epd_wait_refresh(uint32_t start_ms, uint32_t timeout_ms)
+{
+    /* Phase 1: BUSY must go LOW. That transition is the controller
+     * acknowledging DRF, and it is the only positive evidence that the refresh
+     * is actually happening -- without it, "BUSY is high" is indistinguishable
+     * from "the panel is idle because it ignored us". */
+    uint32_t ms = 0;
+    while (gpio_get(EPD_PIN_BUSY) != 0 && ms < start_ms) {
+        sleep_ms(10);
+        ms += 10;
+    }
+    if (gpio_get(EPD_PIN_BUSY) != 0) {
+        printf("epd: REFRESH NOT STARTED (busy never asserted in %ums)\n",
+               (unsigned)start_ms);
+        return EPD_REFRESH_NOT_STARTED;
+    }
+    printf("epd: refresh started after %ums\n", (unsigned)ms);
+
+    /* Phase 2: BUSY back HIGH means the waveform finished and it is safe to
+     * power the panel down. */
+    uint32_t busy_ms = 0;
+    while (gpio_get(EPD_PIN_BUSY) == 0 && busy_ms < timeout_ms) {
+        sleep_ms(100);
+        busy_ms += 100;
+    }
+    if (gpio_get(EPD_PIN_BUSY) == 0) {
+        printf("epd: refresh TIMEOUT (busy still low after %ums)\n",
+               (unsigned)busy_ms);
+        return EPD_REFRESH_TIMEOUT;
+    }
+    printf("epd: refresh done in %ums\n", (unsigned)busy_ms);
+    return EPD_REFRESH_OK;
+}
+
 static inline void cs_assert(const uint8_t *cs_pins, uint8_t n)
 {
     for (uint8_t i = 0; i < n; i++) gpio_put(cs_pins[i], 0);

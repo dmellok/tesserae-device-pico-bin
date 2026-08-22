@@ -93,6 +93,14 @@ static void latch(void)
     } else {
         s_reason = WAKE_COLD;
         s_boot   = 1;
+        /* Cold boot: every across-wakes counter starts over. Done here rather
+         * than at the call sites so it cannot depend on the order main() reads
+         * them in -- a reader that ran first would otherwise see a stale value
+         * from the previous power session. Note that scratch survives a power
+         * cycle on some boards, so "cold" is the only reliable reset point. */
+        scratch_put16(3, 0);   /* connectivity failures */
+        scratch_put16(4, 0);   /* splash state on the glass */
+        scratch_put16(5, 0);   /* relay 401 streak */
     }
     scratch_put16(1, s_boot);
     s_latched = true;
@@ -101,10 +109,24 @@ static void latch(void)
 wake_reason_t sleep_wake_reason(void) { latch(); return s_reason; }
 uint32_t      sleep_boot_count(void)  { latch(); return s_boot;   }
 
+void sleep_force_cold_boot(void)
+{
+    scratch_put16(0, 0);   /* clear the wake marker; latch() then sees a cold boot */
+}
+
 /* scratch[3] low-16: consecutive connectivity failures (survives deep sleep). */
 uint32_t sleep_failcount(void)      { return scratch_get16(3); }
 void     sleep_failcount_inc(void)  { scratch_put16(3, scratch_get16(3) + 1); }
 void     sleep_failcount_reset(void){ scratch_put16(3, 0); }
+
+/* scratch[4] low-16: the splash_state_t currently on the glass. */
+uint32_t sleep_splash_state(void)          { latch(); return scratch_get16(4); }
+void     sleep_set_splash_state(uint32_t s){ scratch_put16(4, s); }
+
+/* scratch[5] low-16: consecutive wakes answered 401 by the cloud relay. */
+uint32_t sleep_relay_authfail(void)      { return scratch_get16(5); }
+void     sleep_relay_authfail_inc(void)  { scratch_put16(5, scratch_get16(5) + 1); }
+void     sleep_relay_authfail_reset(void){ scratch_put16(5, 0); }
 
 void sleep_set_epoch(uint32_t sec)
 {

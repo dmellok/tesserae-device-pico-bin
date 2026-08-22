@@ -26,12 +26,18 @@
 #include "splash.h"
 #include "sleepmgr.h"
 #include "config.h"
+#include "fw_version.h"
+#include "relay.h"
 
 /* ---------- page markup (verbatim from tesserae-device-esp32-bin) ---------- */
 
 static const char k_head[] =
 "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
+/* maximum-scale pins the viewport so iOS does not zoom in when a field takes
+ * focus and then leave the form scrolled off-screen; the 16px input font below
+ * is the other half of that fix (Safari zooms any input under 16px). */
+"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,"
+"maximum-scale=1,viewport-fit=cover\">"
 "<title>Tesserae Setup</title>"
 "<style>"
 ":root{--bg:#f1f0ec;--surface:#fff;--fg:#18181b;--muted:#71706c;"
@@ -56,7 +62,7 @@ static const char k_head[] =
 ".field:last-child{margin-bottom:0}"
 "label{display:block;font-weight:500;font-size:13px;margin-bottom:6px;color:var(--fg)}"
 "input,select{width:100%;padding:10px 12px;border:1px solid var(--border);"
-"border-radius:6px;background:var(--surface);font:inherit;font-size:15px;"
+"border-radius:6px;background:var(--surface);font:inherit;font-size:16px;"
 "color:var(--fg);-webkit-appearance:none;appearance:none;"
 "transition:border-color .12s,box-shadow .12s}"
 "input:focus,select:focus{outline:none;border-color:var(--accent);"
@@ -127,6 +133,30 @@ static const char k_form_server_fmt[] =
 "</div>"
 "</section>";
 
+/* Cloud relay card; %s x2 = (relay_url prefill, paired-state hint).
+ *
+ * A relay panel needs NO server URL: it reaches the home instance through the
+ * relay mailbox instead, which is the whole point (the home instance stays off
+ * the internet). The form therefore accepts either, and save_form() does not
+ * require the server field when a relay code is supplied. */
+static const char k_form_relay_fmt[] =
+"<section class=\"card\"><h2>Cloud relay (optional)</h2>"
+"<p class=\"hint\">For a panel that cannot reach the Tesserae server directly: "
+"a different house, a hotspot, behind CGNAT. Frames are end-to-end encrypted; "
+"the relay only ever holds ciphertext.</p>"
+"<div class=\"field\">"
+"<label for=\"relay_url\">Relay URL</label>"
+"<input id=\"relay_url\" name=\"relay_url\" maxlength=\"159\" "
+"autocomplete=\"off\" value=\"%s\" placeholder=\"" RELAY_DEFAULT_URL "\">"
+"</div>"
+"<div class=\"field\">"
+"<label for=\"relay_code\">Pairing code</label>"
+"<input id=\"relay_code\" name=\"relay_code\" maxlength=\"23\" "
+"autocomplete=\"off\" placeholder=\"from Settings &rarr; Cloud relay\">"
+"<p class=\"hint\">%s</p>"
+"</div>"
+"</section>";
+
 /* MQTT card; %s x3 = (mqtt_uri, device_id, mqtt_user). Legacy/optional: leave
  * the broker URI blank to use the Tesserae server (REST) above instead. */
 static const char k_form_mqtt_fmt[] =
@@ -157,6 +187,12 @@ static const char k_form_mqtt_fmt[] =
 "</section>"
 "<button class=\"submit\" type=\"submit\">Save &amp; restart</button>"
 "</form>";
+
+/* Footer; %s x2 = (firmware version, device id). Printed so a support request
+ * can quote what is actually running without a serial cable. */
+static const char k_footer_fmt[] =
+"<p class=\"tag\" style=\"text-align:center;margin-top:18px\">"
+"Tesserae firmware %s &middot; %s</p>";
 
 static const char k_tail[] =
 "<script>"
@@ -271,21 +307,58 @@ static bool form_field(const char *body, const char *key, char *dst, size_t dst_
 /* ---------- WiFi scan (populate the form's network picker) ---------- */
 
 #define SCAN_MAX 16
-static char s_scan[SCAN_MAX][33];
-static int  s_scan_count;
+
+/* The scan is also where the WiFi fast-connect hint comes from: the CYW43
+ * driver reports an associated BSSID but never an associated CHANNEL, so a scan
+ * result is the only place the channel is ever visible. Keeping bssid+channel
+ * per SSID lets save_form() seed the hint for whichever network the operator
+ * picks, and the first real connect then starts out already targeted. */
+typedef struct {
+    char    ssid[33];
+    uint8_t bssid[6];
+    uint8_t channel;
+    int16_t rssi;
+} scan_ap_t;
+
+static scan_ap_t s_scan[SCAN_MAX];
+static int       s_scan_count;
 
 static int scan_cb(void *env, const cyw43_ev_scan_result_t *r)
 {
     (void)env;
     if (!r || r->ssid_len == 0 || r->ssid_len > 32) return 0;
-    if (s_scan_count >= SCAN_MAX) return 0;
     char ssid[33];
     memcpy(ssid, r->ssid, r->ssid_len);
     ssid[r->ssid_len] = '\0';
-    for (int i = 0; i < s_scan_count; i++)
-        if (strcmp(s_scan[i], ssid) == 0) return 0;   /* dedup */
-    memcpy(s_scan[s_scan_count++], ssid, (size_t)r->ssid_len + 1);
+
+    /* One entry per SSID, keeping the strongest BSSID: on a mesh or a
+     * multi-AP house that is the one we will actually associate with, so it is
+     * also the right hint to store. */
+    for (int i = 0; i < s_scan_count; i++) {
+        if (strcmp(s_scan[i].ssid, ssid) != 0) continue;
+        if (r->rssi > s_scan[i].rssi) {
+            memcpy(s_scan[i].bssid, r->bssid, 6);
+            s_scan[i].channel = (uint8_t)r->channel;
+            s_scan[i].rssi    = r->rssi;
+        }
+        return 0;
+    }
+    if (s_scan_count >= SCAN_MAX) return 0;
+    scan_ap_t *e = &s_scan[s_scan_count++];
+    memcpy(e->ssid, ssid, (size_t)r->ssid_len + 1);
+    memcpy(e->bssid, r->bssid, 6);
+    e->channel = (uint8_t)r->channel;
+    e->rssi    = r->rssi;
     return 0;
+}
+
+/* Look up a scanned network by name. NULL when it was not seen this scan (the
+ * operator typed an SSID by hand, or is provisioning out of range). */
+static const scan_ap_t *scan_find(const char *ssid)
+{
+    for (int i = 0; i < s_scan_count; i++)
+        if (strcmp(s_scan[i].ssid, ssid) == 0) return &s_scan[i];
+    return NULL;
 }
 
 /* Scan for nearby APs and (re)fill the picker cache. Runs in whatever mode is
@@ -317,7 +390,7 @@ static void build_picker(char *dst, size_t cap)
             "<select id=\"ssid-pick\"><option value=\"\">Choose a network&hellip;</option>");
         for (int i = 0; i < s_scan_count && n < cap - 96; i++) {
             char esc[100];
-            html_escape(s_scan[i], esc, sizeof esc);
+            html_escape(s_scan[i].ssid, esc, sizeof esc);
             n += (size_t)snprintf(dst + n, cap - n, "<option>%s</option>", esc);
         }
         n += (size_t)snprintf(dst + n, cap - n, "</select>");
@@ -330,7 +403,10 @@ static void build_picker(char *dst, size_t cap)
 /* ---------- HTTP server (raw TCP) ---------- */
 
 #define REQ_MAX   1280
-#define PAGE_MAX  8192
+/* The form is now WiFi + server + relay + MQTT + footer, plus up to 640 bytes
+ * of scan picker. Sized with headroom so a full page can never be truncated
+ * mid-tag (which renders as a blank card, not an obvious error). */
+#define PAGE_MAX  12288
 
 static char           s_resp[PAGE_MAX];   /* one connection serviced at a time */
 static volatile bool  s_reboot_pending;
@@ -359,12 +435,20 @@ static void conn_close(struct tcp_pcb *pcb, conn_t *c)
 static size_t build_form(void)
 {
     const config_t *cfg = config_get();
-    char ssid[80], uri[200], devid[80], user[80], server[200];
+    char ssid[80], uri[200], devid[80], user[80], server[200], relay[200];
     html_escape(cfg->wifi_ssid, ssid, sizeof ssid);
     html_escape(cfg->server_url, server, sizeof server);
+    html_escape(cfg->relay_url, relay, sizeof relay);
     html_escape(cfg->mqtt_uri, uri, sizeof uri);
     html_escape(cfg->mqtt_device_id, devid, sizeof devid);
     html_escape(cfg->mqtt_user, user, sizeof user);
+
+    /* Say where relay pairing stands, so a code that is already in flight does
+     * not look like a field the operator forgot to fill in. */
+    const char *relay_state =
+        config_relay_ready()    ? "Paired. Enter a new code only to re-pair."
+        : cfg->relay_code[0]    ? "Pairing in progress. Enter a new code only to start over."
+        : "Codes expire after 10 minutes; grab a fresh one if this fails.";
 
     /* Body is assembled after the header; we backfill Content-Length once known.
      * Simpler: build body in a scratch, then emit headers + body. */
@@ -376,7 +460,10 @@ static size_t build_form(void)
     n += snprintf(body + n, sizeof body - n, "%s", k_head);
     n += snprintf(body + n, sizeof body - n, k_form_wifi_fmt, ssid, picker);
     n += snprintf(body + n, sizeof body - n, k_form_server_fmt, server);
+    n += snprintf(body + n, sizeof body - n, k_form_relay_fmt, relay, relay_state);
     n += snprintf(body + n, sizeof body - n, k_form_mqtt_fmt, uri, devid, user);
+    n += snprintf(body + n, sizeof body - n, k_footer_fmt, FW_VERSION,
+                  config_device_id());
     n += snprintf(body + n, sizeof body - n, "%s", k_tail);
 
     int h = snprintf(s_resp, sizeof s_resp,
@@ -397,20 +484,84 @@ static size_t build_static(const char *html)
     return (size_t)(h + n);
 }
 
+/* Tidy a hand-typed origin in place.
+ *
+ * Phones capitalise the first letter of a text field and browsers happily post
+ * a trailing slash, so "Http://Tesserae.local:8765/" is a realistic submission.
+ * Left alone it produces a Host header the server does not match and a
+ * "//api/v1/..." path -- a setup failure whose cause is invisible from the
+ * panel. Normalising here (rather than at each request site) means every
+ * consumer of server_url/relay_url sees one canonical form.
+ *
+ * Scheme and host are lowercased; the PATH is not, since a path can be
+ * case-sensitive. A missing scheme gets `dflt`, which is how "tesserae.local:
+ * 8765" becomes a working URL. */
+static void normalize_url(char *s, size_t cap, const char *dflt)
+{
+    if (s == NULL || s[0] == '\0') return;
+
+    /* Trim surrounding whitespace (paste artefacts). */
+    char *b = s;
+    while (*b == ' ' || *b == '\t') b++;
+    size_t len = strlen(b);
+    while (len > 0 && (b[len - 1] == ' ' || b[len - 1] == '\t' ||
+                       b[len - 1] == '\r' || b[len - 1] == '\n')) len--;
+    b[len] = '\0';
+    if (b != s) memmove(s, b, len + 1);
+    if (s[0] == '\0') return;
+
+    /* Lowercase the scheme, if one was typed. */
+    char *sep = strstr(s, "://");
+    if (sep != NULL) {
+        for (char *p = s; p < sep; p++)
+            if (*p >= 'A' && *p <= 'Z') *p += 32;
+    }
+
+    /* Prepend the default scheme when none was given. Checking for "://"
+     * rather than a bare ':' matters: "tesserae.local:8765" has a colon but no
+     * scheme, and is exactly the input this is here to rescue. */
+    if (strstr(s, "://") == NULL) {
+        size_t dlen = strlen(dflt);
+        size_t slen = strlen(s);
+        if (dlen + slen < cap) {
+            memmove(s + dlen, s, slen + 1);
+            memcpy(s, dflt, dlen);
+        }
+        sep = strstr(s, "://");
+    }
+
+    /* Lowercase the host (DNS is case-insensitive; the Host header comparison
+     * on the far end may not be). Stop at the port or path. */
+    if (sep != NULL) {
+        for (char *p = sep + 3; *p && *p != '/' && *p != ':'; p++)
+            if (*p >= 'A' && *p <= 'Z') *p += 32;
+    }
+
+    /* Drop trailing slashes: every request site appends an absolute path. */
+    size_t n = strlen(s);
+    while (n > 0 && s[n - 1] == '/') s[--n] = '\0';
+}
+
 /* Apply a submitted form body to config and persist. */
 static void save_form(const char *body)
 {
     char ssid[40] = {0}, pass[80] = {0};
     char uri[200] = {0}, devid[40] = {0}, user[72] = {0}, mpass[72] = {0};
     char surl[200] = {0}, pcode[32] = {0};
+    char rurl[200] = {0}, rcode[40] = {0};
     bool has_ssid  = form_field(body, "ssid", ssid, sizeof ssid);
     bool has_pass  = form_field(body, "pass", pass, sizeof pass);
     bool has_surl  = form_field(body, "server_url", surl, sizeof surl);
     bool has_pcode = form_field(body, "pairing_code", pcode, sizeof pcode);
+    bool has_rurl  = form_field(body, "relay_url", rurl, sizeof rurl);
+    bool has_rcode = form_field(body, "relay_code", rcode, sizeof rcode);
     bool has_uri   = form_field(body, "mqtt_uri", uri, sizeof uri);
     bool has_devid = form_field(body, "device_id", devid, sizeof devid);
     bool has_user  = form_field(body, "mqtt_user", user, sizeof user);
     bool has_mpass = form_field(body, "mqtt_pass", mpass, sizeof mpass);
+
+    normalize_url(surl, sizeof surl, "http://");   /* a home instance is usually plain LAN HTTP */
+    normalize_url(rurl, sizeof rurl, "https://");  /* the relay is public internet: TLS only */
 
     /* NULL means "leave unchanged"; a blank password keeps the existing one.
      * server_url is set verbatim (blank clears it, reverting to MQTT). */
@@ -422,6 +573,22 @@ static void save_form(const char *body)
                     has_user ? user : NULL,
                     (has_mpass && mpass[0]) ? mpass : NULL);
 
+    /* Seed the WiFi fast-connect hint from this scan while we still have it: a
+     * scan is the only place the AP's CHANNEL is ever visible (the driver
+     * reports an associated BSSID but never an associated channel), so missing
+     * it here means the first real connect pays a full scan for nothing. Only
+     * when the operator picked a network we actually saw. */
+    if (has_ssid && ssid[0]) {
+        const scan_ap_t *ap = scan_find(ssid);
+        if (ap != NULL) {
+            config_set_ap_hint(ap->bssid, ap->channel);
+            printf("portal: seeded fast-connect hint for '%s' (ch %u)\n",
+                   ssid, (unsigned)ap->channel);
+        } else {
+            config_clear_ap_hint();   /* typed by hand, or a different network */
+        }
+    }
+
     /* A freshly entered pairing code means "(re)pair": store it and force a new
      * registration by clearing any old token + cached frame ETag. */
     if (has_pcode && pcode[0]) {
@@ -430,8 +597,22 @@ static void save_form(const char *body)
         config_set_frame_etag("");
     }
 
-    printf("portal: saving config (ssid='%s' server='%s' uri='%s' devid='%s')\n",
-           ssid, surl, uri, devid);
+    /* Relay: a URL with no code is fine (it just sits unused until a code
+     * arrives), but a code with no URL cannot pair, so default the URL to the
+     * hosted relay rather than silently dropping the code. */
+    if (has_rurl) config_set_relay_url(rurl);
+    if (has_rcode && rcode[0]) {
+        if (config_get()->relay_url[0] == '\0')
+            config_set_relay_url(RELAY_DEFAULT_URL);
+        /* A new code supersedes any existing pairing: drop the old mailbox
+         * identity and key first, so a half-replaced pairing can never poll one
+         * mailbox with another's token. */
+        config_clear_relay();
+        config_set_relay_code(rcode);
+    }
+
+    printf("portal: saving config (ssid='%s' server='%s' relay='%s' uri='%s' devid='%s')\n",
+           ssid, surl, config_get()->relay_url, uri, devid);
     printf(config_save() ? "portal: config saved\n" : "portal: SAVE FAILED\n");
 }
 
@@ -540,8 +721,11 @@ void portal_run(const panel_t *panel, uint8_t variant)
              bid.id[PICO_UNIQUE_BOARD_ID_SIZE_BYTES - 1]);
 
     /* Paint the setup splash first (instructions + join QR) while the radio is
-     * still down, then bring up the AP. */
+     * still down, then bring up the AP. Recording what went on the glass means
+     * the post-setup boot can tell an onboarding message apart from a repeat and
+     * repaint only when something actually changed (see main.c). */
     splash_show_setup(panel, variant, ssid);
+    sleep_set_splash_state((uint32_t)SPLASH_SETUP);
 
     if (cyw43_arch_init_with_country(CYW43_COUNTRY_WORLDWIDE)) {
         printf("portal: cyw43 init failed\n");
@@ -601,6 +785,11 @@ void portal_run(const panel_t *panel, uint8_t variant)
     }
     printf("portal: settings saved, rebooting\n");
     sleep_ms(800);   /* let the "Saved" response flush to the browser */
+    /* The device has just been reconfigured: make the next boot a COLD one so
+     * the onboarding status screens are allowed to paint and every across-wake
+     * counter starts over. A plain watchdog_reboot leaves the deep-sleep wake
+     * marker set, and the fresh setup would look like a routine timer wake. */
+    sleep_force_cold_boot();
     watchdog_reboot(0, 0, 0);
     while (true) tight_loop_contents();
 }

@@ -42,6 +42,28 @@ void epd_reset(int pulses, uint32_t low_ms, uint32_t high_ms, uint32_t settle_ms
  * before we sample it. */
 void epd_wait_ready(uint32_t timeout_ms);
 
+/* Outcome of waiting on a display refresh (DRF). */
+typedef enum {
+    EPD_REFRESH_OK = 0,       /* BUSY asserted, then released: the refresh ran */
+    EPD_REFRESH_NOT_STARTED,  /* BUSY never went low: the controller ignored DRF */
+    EPD_REFRESH_TIMEOUT,      /* BUSY asserted but never released in time */
+} epd_refresh_t;
+
+/* Wait for a just-issued refresh, in two distinct phases.
+ *
+ * This exists because epd_wait_ready() cannot tell "the refresh finished" from
+ * "the refresh never started". Both leave BUSY high, and the caller's next move
+ * is power-off (POF) -- so a DRF the controller dropped (which happens when the
+ * D/C setup hold is marginal; see DC_SETUP_MS in CLAUDE.md) gets the panel
+ * powered down mid-nothing and leaves the glass blank or half-written, with a
+ * cheerful "refresh done" in the log.
+ *
+ * Phase 1 waits up to start_ms for BUSY to go LOW, which is the controller
+ * acknowledging DRF. Phase 2 then waits up to timeout_ms for it to go back
+ * HIGH. A NOT_STARTED result is worth logging loudly and is the caller's cue
+ * that the frame did not reach the glass. */
+epd_refresh_t epd_wait_refresh(uint32_t start_ms, uint32_t timeout_ms);
+
 /* Send one command, with optional trailing data, to the given chip-select
  * line(s) (all asserted together, active low, for the whole transaction).
  * setup_ms is the D/C-to-clock hold the controller needs before the opcode

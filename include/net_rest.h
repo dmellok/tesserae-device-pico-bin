@@ -24,6 +24,7 @@ typedef enum {
     REST_UNAUTH,          /* 401 (token invalid/revoked) */
     REST_FORBIDDEN,       /* 403 (pairing code invalid/expired) */
     REST_RATELIMIT,       /* 429 (retry_after_s populated) */
+    REST_NOT_FOUND,       /* 404 (a feature that is off, or a stale digest) */
     REST_HTTP_ERR,        /* other 4xx/5xx */
     REST_NET_ERR,         /* DNS / TCP / timeout */
 } rest_status_t;
@@ -57,6 +58,10 @@ typedef struct {
     int32_t  sleep_interval_s;  /* from config object, -1 if absent */
     uint32_t server_time;       /* unix seconds, 0 if absent */
     int      retry_after_s;     /* set on REST_RATELIMIT */
+    /* config.tz: the IANA timezone the server wants this device on. "" when
+     * absent, which means "keep what we have" rather than "clear it" -- an
+     * older server simply never sends the key. */
+    char     tz[40];
 } rest_status_out_t;
 
 /* POST /api/v1/device/discover (unauthenticated). The admin claims the device by

@@ -15,10 +15,14 @@
 #define LWIP_NETCONN                0
 #define MEM_LIBC_MALLOC             0
 #define MEM_ALIGNMENT               4
-#define MEM_SIZE                    16000
-#define MEMP_NUM_TCP_SEG            32
+/* Headroom for TLS: a 16 KB inbound record is reassembled from many segments,
+ * and the handshake bursts several KB outbound in one write. The stock 16000 /
+ * 24 works for plain HTTP but starves under altcp_tls, where the symptom is an
+ * ERR_MEM mid-handshake rather than anything that names memory. */
+#define MEM_SIZE                    32000
+#define MEMP_NUM_TCP_SEG            48
 #define MEMP_NUM_ARP_QUEUE          10
-#define PBUF_POOL_SIZE              24
+#define PBUF_POOL_SIZE              32
 #define LWIP_ARP                    1
 #define LWIP_ETHERNET               1
 #define LWIP_ICMP                   1
@@ -52,8 +56,24 @@
 #define LWIP_NUM_NETIF_CLIENT_DATA  2   /* mDNS stores per-netif state here   */
 #define MDNS_MAX_SERVICES           1
 #define MEMP_NUM_UDP_PCB            8   /* DHCP + DNS + SNTP + mDNS + headroom */
-#define LWIP_ALTCP                  1   /* lwIP HTTP client is built on altcp */
-#define LWIP_ALTCP_TLS              0   /* HTTP only for now, no TLS */
+/* altcp is the connection abstraction net_httpc.c is written against: the same
+ * client code drives plain TCP and TLS, which is what lets an http:// home
+ * server and an https:// cloud relay share one implementation. */
+#define LWIP_ALTCP                  1
+#define LWIP_ALTCP_TLS              1
+#define LWIP_ALTCP_TLS_MBEDTLS      1
+
+/* IPv6, SLAAC only (no DHCPv6): a v6-only or v6-preferred network can host the
+ * Tesserae server, and without this the device simply cannot reach it. DNS asks
+ * for both families and takes whichever answers, so a dual-stack network keeps
+ * behaving exactly as it did. */
+#define LWIP_IPV6                   1
+#define LWIP_IPV6_AUTOCONFIG        1
+#define LWIP_IPV6_DHCP6             0
+#define LWIP_ICMP6                  1
+#define LWIP_IPV6_MLD               1
+#define MEMP_NUM_ND6_QUEUE          4
+#define LWIP_DNS_ADDRTYPE_DEFAULT   LWIP_DNS_ADDRTYPE_IPV4_IPV6
 
 /* extra timeouts headroom for the apps (DHCP/DNS/SNTP/MQTT/mDNS timers) */
 #define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8)

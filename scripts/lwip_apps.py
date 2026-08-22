@@ -15,11 +15,14 @@ platform = env.PioPlatform()
 fw = platform.get_package_dir("framework-picosdk")
 apps = join(fw, "lib", "lwip", "src", "apps")
 
-# Add app sources as each feature lands. mDNS/HTTPD are added in later phases.
+# lwIP's http_client app is deliberately NOT here: it cannot set request headers
+# (no Authorization, no If-None-Match), which the Tesserae protocol needs on
+# every call. src/net_httpc.c replaces it with a client written directly against
+# altcp, which also gets TLS for free. See net_httpc.h.
 lib = env.BuildLibrary(
     join("$BUILD_DIR", "LwipApps"),
     apps,
-    "-<*> +<mqtt/mqtt.c> +<http/http_client.c> +<sntp/sntp.c> "
+    "-<*> +<mqtt/mqtt.c> +<sntp/sntp.c> "
     "+<mdns/mdns.c> +<mdns/mdns_domain.c> +<mdns/mdns_out.c>",
 )
 env.Append(LIBS=[lib])

@@ -20,6 +20,14 @@
 //#define SERVER_URL      "http://tesserae.local:8765"
 //#define PAIRING_CODE    "123456"
 
+/* Cloud relay (for a panel that cannot reach the Tesserae server directly).
+ * Get a single-use code from Settings -> Cloud relay -> Add a remote panel; it
+ * expires after 10 minutes, so flash promptly. RELAY_URL defaults to the hosted
+ * relay when omitted. A relay panel needs NO SERVER_URL -- the two are
+ * alternatives, and the relay wins if both are set. */
+//#define RELAY_URL       "https://relay.tesserae.ink"
+//#define RELAY_CODE      "ABCD-1234"
+
 /* MQTT broker and identity (legacy; only used when SERVER_URL is not set). */
 //#define MQTT_URI        "mqtt://homeassistant.local:1883"
 //#define MQTT_DEVICE_ID  "pico"

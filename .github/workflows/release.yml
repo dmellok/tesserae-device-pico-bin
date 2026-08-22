@@ -1,0 +1,66 @@
+#
+# Build and publish a tagged release.
+#
+# Tag v1.2.0 produces a firmware that reports fw_version "1.2.0" -- the leading
+# "v" is stripped for the heartbeat because the server parses that field as
+# plain SemVer, while the artifact filenames keep the "v" so they sort and read
+# the way a release page expects.
+#
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Resolve the version
+        id: ver
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "semver=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      # PLATFORMIO_BUILD_FLAGS appends to platformio.ini's build_flags, so this
+      # adds the stamp without disturbing the rest of the build.
+      - name: Build
+        env:
+          PLATFORMIO_BUILD_FLAGS: -DTESSERAE_FW_VERSION=\"${{ steps.ver.outputs.semver }}\"
+        run: pio run --environment pimoroni_pico_plus_2w
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          cp .pio/build/pimoroni_pico_plus_2w/firmware.uf2 \
+             "dist/tesserae-pico-bin-${{ steps.ver.outputs.tag }}.uf2"
+          cp .pio/build/pimoroni_pico_plus_2w/firmware.elf \
+             "dist/tesserae-pico-bin-${{ steps.ver.outputs.tag }}.elf"
+          ( cd dist && sha256sum * > SHA256SUMS )
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

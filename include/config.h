@@ -2,9 +2,9 @@
  * config.h: persistent device configuration, stored in a reserved flash sector.
  *
  * Replaces the ESP32 client's NVS. Holds the same surface: WiFi credentials,
- * MQTT broker/identity, and runtime state (last-painted hash, sleep interval).
- * The whole config is a single fixed struct, loaded into RAM at boot and
- * written back on change.
+ * MQTT broker/identity, REST identity, the cloud-relay pairing, and runtime
+ * state (last-painted hash, sleep interval). The whole config is a single fixed
+ * struct, loaded into RAM at boot and written back on change.
  *
  * Flash-write safety: config_save() erases/programs a flash sector with
  * interrupts disabled, so it must be called with the radio down (e.g. at boot
@@ -14,6 +14,11 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+
+/* Cloud-relay key material sizes (mirrors relay_crypto.h so config.h stays
+ * standalone; the two are static-asserted together in relay_crypto.c). */
+#define CONFIG_RELAY_PRIV_LEN  32
+#define CONFIG_RELAY_KEY_LEN   32
 
 /* Field sizes mirror the ESP32 NVS limits (+1 for NUL). */
 typedef struct {
@@ -31,6 +36,35 @@ typedef struct {
     char    device_token[256];      /* bearer token, set after /device/register */
     char    pairing_code[16];       /* set pre-register, cleared on success */
     char    last_frame_etag[80];    /* cached across wakes for If-None-Match */
+
+    /* WiFi fast-connect hint: the BSSID + channel we last associated with.
+     * Targeting them directly skips the all-channel scan on a wake, which is
+     * the single biggest slice of radio-on time in a cycle. Cleared whenever a
+     * targeted join fails, so a roamed/moved AP self-heals via a full scan. */
+    uint8_t ap_bssid[6];
+    uint8_t ap_channel;
+    uint8_t ap_hint;                /* 1 when ap_bssid/ap_channel are valid */
+
+    /* IANA timezone published by the server (proto v2 status contract). Empty
+     * until the server delivers one; echoed back on every heartbeat. */
+    char    tz[40];
+
+    /* ---- cloud relay (see relay.h) ----
+     * A relay panel talks only to the relay mailbox and needs no server_url.
+     * relay_priv is held ONLY between the pairing POST and the key derivation,
+     * then wiped: once relay_key exists the scalar is dead weight and a
+     * liability. */
+    char    relay_url[160];         /* e.g. https://relay.tesserae.ink */
+    char    relay_code[24];         /* single-use pairing code, cleared on success */
+    char    relay_install[64];      /* mailbox install id  */
+    char    relay_device[64];       /* mailbox device id   */
+    char    relay_token[256];       /* mailbox bearer token */
+    char    relay_etag[80];         /* last painted frame's ETag */
+    char    relay_config_etag[80];  /* last applied config document's ETag */
+    uint8_t relay_priv[CONFIG_RELAY_PRIV_LEN];
+    uint8_t relay_key[CONFIG_RELAY_KEY_LEN];
+    uint8_t relay_have_priv;        /* 1 while the X25519 scalar is held */
+    uint8_t relay_paired;           /* 1 once install/device/token/key are all set */
 } config_t;
 
 /* Load config from flash into the in-RAM copy. Returns true if a valid saved
@@ -41,6 +75,10 @@ bool config_load(void);
 /* Write the in-RAM copy back to flash. Radio must be down. Returns true on a
  * successful program+verify. */
 bool config_save(void);
+
+/* Erase the stored config so the next boot comes up blank (factory reset).
+ * Radio must be down; does not touch the in-RAM copy. */
+bool config_erase(void);
 
 /* Accessors (return the in-RAM copy; never NULL). */
 const config_t *config_get(void);
@@ -64,12 +102,49 @@ void config_set_device_token(const char *token);
 void config_set_pairing_code(const char *code);
 void config_set_frame_etag(const char *etag);
 
+/* Timezone published by the server (proto v2). Empty clears it. */
+void config_set_tz(const char *tz);
+
+/* WiFi fast-connect hint. config_set_ap_hint stores the BSSID + channel of a
+ * successful association; config_clear_ap_hint drops a hint that failed. Both
+ * are no-ops when the value is unchanged, so a steady-state wake never dirties
+ * the config and never pays a flash erase. Returns true if anything changed. */
+bool config_set_ap_hint(const uint8_t bssid[6], uint8_t channel);
+bool config_clear_ap_hint(void);
+
+/* ---- cloud relay ---- */
+
+void config_set_relay_url(const char *url);
+void config_set_relay_code(const char *code);
+
+/* Persist the X25519 scalar between the pairing POST and the key derivation. */
+void config_set_relay_priv(const uint8_t priv[CONFIG_RELAY_PRIV_LEN]);
+
+/* Adopt a completed pairing: mailbox identity + derived frame key. Wipes the
+ * private scalar, which is no longer needed and must not outlive the exchange. */
+void config_set_relay_paired(const char *install_id, const char *device_id,
+                             const char *token,
+                             const uint8_t key[CONFIG_RELAY_KEY_LEN]);
+
+void config_set_relay_etag(const char *etag);
+void config_set_relay_config_etag(const char *etag);
+
+/* Drop every piece of relay pairing state (code, scalar, identity, key, etags).
+ * relay_url survives: it is operator configuration, not pairing state. */
+void config_clear_relay(void);
+
+/* True once the device holds a complete mailbox identity and frame key. */
+bool config_relay_ready(void);
+
 /* Convenience: true if a WiFi SSID is configured. */
 bool config_has_wifi(void);
 
 /* True if a REST server URL is configured (selects REST over MQTT). */
 bool config_has_server(void);
 
+/* True if a relay URL is configured (the device may be paired or still pairing). */
+bool config_has_relay(void);
+
 /* Effective device id: the configured mqtt_device_id if set, otherwise a stable
- * default "pico_" + hex(unique board id). Cached; never NULL. */
+ * default "<board model>_<unique-id suffix>". Cached; never NULL. */
 const char *config_device_id(void);

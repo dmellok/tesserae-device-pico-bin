@@ -1,0 +1,70 @@
+#
+# Build the firmware on every push, stamping a version into it.
+#
+# The stamp matters beyond bookkeeping: the /status heartbeat reports
+# `fw_version`, and the Tesserae server compares it against the latest available
+# build to decide whether it can offer this device an update. An unstamped build
+# reports "0.0.0-dev", which the server reads as "never offer an update", so a
+# locally-flashed device is never nagged.
+#
+# Push builds get an auto-incrementing 0.0.<run>, matching
+# tesserae-device-firmware. Tagged releases are handled by release.yml, which
+# stamps the tag's semantic version instead.
+#
+name: firmware
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The toolchain and the Pico SDK are a few hundred MB and change only when
+      # platformio.ini pins a different revision.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      # PLATFORMIO_BUILD_FLAGS APPENDS to platformio.ini's build_flags rather
+      # than replacing them, so -DPIO_STDIO_USB and the lwIP wiring stay intact
+      # and this only adds the stamp.
+      - name: Build
+        env:
+          # No leading "v": the server parses this as plain SemVer, and a "v"
+          # prefix fails the comparison silently rather than erroring.
+          PLATFORMIO_BUILD_FLAGS: -DTESSERAE_FW_VERSION=\"0.0.${{ github.run_number }}\"
+        run: pio run --environment pimoroni_pico_plus_2w
+
+      - name: Stage artifacts
+        env:
+          FW_VERSION: 0.0.${{ github.run_number }}
+        run: |
+          mkdir -p dist
+          cp .pio/build/pimoroni_pico_plus_2w/firmware.uf2 \
+             "dist/tesserae-pico-bin-${FW_VERSION}.uf2"
+          cp .pio/build/pimoroni_pico_plus_2w/firmware.elf \
+             "dist/tesserae-pico-bin-${FW_VERSION}.elf"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-0.0.${{ github.run_number }}
+          path: dist/
+          if-no-files-found: error

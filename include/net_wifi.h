@@ -12,8 +12,18 @@
 #include <stdint.h>
 
 /* Bring up CYW43 (once) and join an AP in station mode. pass may be NULL/empty
- * for an open network. Returns true on association + DHCP lease. */
-bool wifi_connect(const char *ssid, const char *pass, uint32_t timeout_ms);
+ * for an open network. Returns true on association + DHCP lease.
+ *
+ * Fast path: if config holds a BSSID + channel hint from the last successful
+ * join (config_set_ap_hint), the first attempt targets that AP directly, which
+ * skips the all-channel scan the driver otherwise runs. A stale hint (the AP
+ * moved channel, or we are somewhere else entirely) fails quickly and is
+ * cleared before falling back to a normal scan-and-join, so the hint can never
+ * strand the device. On success the hint is refreshed from the AP we actually
+ * associated with. Marks *dirty when the stored hint changed and the caller
+ * should persist config; pass NULL if you do not care. */
+bool wifi_connect(const char *ssid, const char *pass, uint32_t timeout_ms,
+                  bool *dirty);
 
 /* Dotted IPv4 of the station, or "0.0.0.0" if not up. out must be >= 16 bytes. */
 void wifi_get_ip(char *out, size_t n);
