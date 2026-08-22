@@ -13,8 +13,14 @@
 # OS cruft
 .DS_Store
 
-# Local credential / config overrides, if ever added (mirrors the esp32 repo)
-include/secrets.h
+# Local credential / config overrides (mirrors the esp32 repo).
+#
+# The glob matters: an exact "include/secrets.h" does not cover the .bak/.orig
+# copies that get made while swapping credentials in and out during bench work,
+# and one `git add -A` then commits a WiFi password. Match anything that starts
+# with the name, and keep the checked-in template explicitly.
+include/secrets.h*
+!include/secrets.example.h
 
 # Local-only Claude Code project guidance (not shared)
 CLAUDE.md
