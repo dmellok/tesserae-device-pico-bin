@@ -309,7 +309,8 @@ sleep: deep sleep for 900 s (wake reboots)
 | [`src/sleepmgr.c`](src/sleepmgr.c) | POWMAN deep sleep + wake reason + LPOSC-trimmed wall-clock + the across-wake counters. |
 | [`src/battery.c`](src/battery.c) / [`src/buttons.c`](src/buttons.c) | VSYS battery sense; the front buttons (awake-only, see the header). |
 | [`src/splash.c`](src/splash.c) | On-device procedural splashes: setup (logo + text + QR) and the status screens. |
-| [`src/vendor/`](src/vendor) | Third-party: DHCP/DNS servers, QR encoder, cJSON, Monocypher. See [NOTICES.md](NOTICES.md). |
+| [`src/frame_codec.c`](src/frame_codec.c) | Optional DEFLATE decompression for incoming frames; detects zlib/gzip by content, inflates into PSRAM. |
+| [`src/vendor/`](src/vendor) | Third-party: DHCP/DNS servers, QR encoder, cJSON, Monocypher, uzlib (inflate only). See [NOTICES.md](NOTICES.md). |
 | [`scripts/mbedtls.py`](scripts/mbedtls.py) | Builds the Pico SDK's bundled mbedTLS + lwIP's altcp_tls glue, which the PlatformIO framework does not. |
 
 The init-sequence argument blobs in `src/panels.c` come from the Pimoroni Inky
@@ -395,19 +396,31 @@ colour and sharp text over a six-value palette, so that ratio is the format, not
 a lucky sample. At ~7 KB a frame is one small request, far below the point where
 the record ramp starts, and the 16384 bug stops mattering.
 
-That needs no change on the relay: the Worker forwards opaque bytes and already
-echoes a plaintext `X-Tesserae-Format` from whatever the publisher stores, so
-home deflates before sealing and marks the format, and the firmware inflates
-after unsealing. Order matters -- ciphertext does not compress, so it must be
-compress-then-seal. Note that compress-then-encrypt carries a CRIME-style length
-side channel; here the plaintext is a server-rendered dashboard no attacker
+**The firmware half is done and waiting** ([`src/frame_codec.c`](src/frame_codec.c)).
+A frame whose decrypted length is not exactly the panel's size is checked for a
+zlib or gzip header and inflated. Measured on hardware: 6,855 bytes to 960,000
+in **435 ms** (2.2 MB/s) into PSRAM, output checksum matching the host
+byte-for-byte. It costs 2.8 KB of flash and is inert until something starts
+compressing.
+
+Detection is **by content, not by contract**: the device already knows its exact
+frame size, so the length that was always the integrity check now doubles as the
+discriminator. Nothing was invented for the server to agree to, so this cannot
+fall out of step with the other end.
+
+What remains is on the **home instance**: deflate the frame before sealing it.
+Order matters -- ciphertext does not compress, so it must be compress-then-seal.
+The relay needs no change at all; it forwards opaque bytes.
+
+One caveat worth stating: compress-then-encrypt carries a CRIME-style length
+side channel. Here the plaintext is a server-rendered dashboard that no attacker
 influences per request, so the leak is roughly "how busy the image is".
 
 If home cannot change, the alternative is `Range` support in the Worker's
 `getFrame` (R2 supports ranges natively) plus a sliced fetch. It works, but each
 slice needs its own connection to reset the record ramp, and a TLS handshake on
 this board measures ~8 s -- roughly 20 handshakes and three minutes per frame,
-against one request for the compressed route.
+against one request and 435 ms for the compressed route.
 
 ## Factory reset
 

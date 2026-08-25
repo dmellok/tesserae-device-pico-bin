@@ -44,3 +44,14 @@ Original license headers are kept intact in the vendored files.
   fetched and fingerprint-checked by `scripts/gen_ca_roots.sh`.
 - Public certificates, distributed for the purpose of validating TLS chains; no
   license terms attach to their redistribution.
+
+## uzlib — `src/vendor/uzlib/`
+- Source: uzlib (Paul Sokolovsky), itself derived from tinf by Joergen Ibsen.
+  Taken from the copy bundled with the `framework-arduinopico` OTA support.
+  DECOMPRESSION ONLY: `tinflate.c`, `tinfzlib.c`, `tinfgzip.c`, `adler32.c`,
+  `crc32.c` and their headers. The compressor (`defl_static.c`, `genlz77.c`) is
+  deliberately not vendored, and its `#include` in `uzlib.h` is commented out,
+  so referencing `uzlib_compress` is a link error rather than a silent pull-in.
+- Used by `src/frame_codec.c` to inflate compressed frames.
+- License: zlib. Copyright (c) 2003 Joergen Ibsen / Jibz, (c) 2014-2018 Paul
+  Sokolovsky.

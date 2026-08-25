@@ -37,6 +37,7 @@
 #include "relay.h"
 #include "relay_crypto.h"
 #include "net_tls.h"
+#include "frame_codec.h"
 
 /* Consecutive cycles that fail to reach WiFi/the server before the firmware
  * re-opens the setup portal (so a wrong WiFi password or server URL can be fixed
@@ -72,6 +73,12 @@
  * Long enough that it cannot happen by accident (the device is usually being
  * handled when it is reset), short enough to be a believable instruction. */
 #define FACTORY_RESET_HOLD_MS  10000
+
+/* Where the sealed download sits in PSRAM, relative to the frame buffer at
+ * PSRAM_XIP_BASE. A compressed frame cannot inflate over its own source, so the
+ * two need separate regions; 2 MB of separation against a 960 KB frame is
+ * simply the roomiest split that is obviously correct on an 8 MB part. */
+#define PSRAM_DOWNLOAD_OFF  (2u * 1024 * 1024)
 
 /* Whether status splashes may paint this boot. See maybe_show_status(). */
 static bool s_status_splash_allowed;
@@ -742,10 +749,27 @@ static bool do_cycle_relay(const panel_t *panel, uint8_t variant, size_t psram_s
     relay_frame_result_t fr = RELAY_FRAME_ERROR;
 
     if (panel != NULL) {
-        uint32_t need = panel_frame_bytes(panel) + RELAY_SEAL_OVERHEAD;
+        uint32_t want = panel_frame_bytes(panel);
+        uint32_t need = want + RELAY_SEAL_OVERHEAD;
+
+        /* Two regions, because a compressed frame cannot inflate over its own
+         * source. The download lands in `buf` and, if it turns out to be
+         * DEFLATE, expands into `inflate_buf`. Neither case ever copies a whole
+         * frame: raw frames are painted straight out of `buf`, compressed ones
+         * straight out of `inflate_buf`.
+         *
+         * PSRAM is 8 MB against a 960 KB frame, so the two regions are simply
+         * placed a comfortable distance apart rather than packed. On a small
+         * panel that fits in SRAM there is no room for a second region, so
+         * compression is not offered there -- those frames are tens of KB and
+         * download fine uncompressed. */
         uint8_t *buf = NULL;
+        uint8_t *inflate_buf = NULL;
         if (need <= 256u * 1024) buf = sram_buf = malloc(need);
-        if (buf == NULL && psram_sz >= need) buf = (uint8_t *)PSRAM_XIP_BASE;
+        if (buf == NULL && psram_sz >= PSRAM_DOWNLOAD_OFF + need) {
+            inflate_buf = (uint8_t *)PSRAM_XIP_BASE;                     /* want + 1 guard */
+            buf         = (uint8_t *)PSRAM_XIP_BASE + PSRAM_DOWNLOAD_OFF;
+        }
         if (buf == NULL) {
             printf("relay: no buffer for %u sealed bytes\n", (unsigned)need);
         } else {
@@ -760,9 +784,27 @@ static bool do_cycle_relay(const panel_t *panel, uint8_t variant, size_t psram_s
             } else if (fr == RELAY_FRAME_NEW) {
                 /* Length is the real integrity check, not the relay's
                  * X-Tesserae-* headers: a frame that decrypts to the wrong size
-                 * is for a different panel and would paint as a diagonal smear. */
-                uint32_t want = panel_frame_bytes(panel);
-                if (frame_len != want) {
+                 * is for a different panel and would paint as a diagonal smear.
+                 *
+                 * It is also what distinguishes a raw frame from a compressed
+                 * one, with no format field to agree on: the exact size is raw,
+                 * and anything else gets examined for a DEFLATE header. See
+                 * frame_codec.h for why detection is by content. */
+                if (frame_len == want) {
+                    /* raw: paint straight out of the download buffer */
+                } else if (inflate_buf != NULL &&
+                           frame_looks_compressed(frame, frame_len)) {
+                    printf("relay: frame is compressed (%u bytes); inflating\n",
+                           (unsigned)frame_len);
+                    if (frame_inflate(frame, frame_len, inflate_buf, want)) {
+                        printf("relay: inflated %u -> %u bytes\n",
+                               (unsigned)frame_len, (unsigned)want);
+                        frame = inflate_buf;
+                        frame_len = want;
+                    } else {
+                        frame = NULL;   /* frame_inflate already said why */
+                    }
+                } else {
                     printf("relay: decrypted frame is %u bytes, panel wants %u; dropping\n",
                            (unsigned)frame_len, (unsigned)want);
                     frame = NULL;
@@ -921,6 +963,9 @@ int main(void)
      * e.g. the 13.3"). Returns 0 on boards without it. The self-test is a
      * temporary de-risk check and will be trimmed once the fetch path uses it. */
     size_t psram_sz = psram_init(PSRAM_CS_PIN_PLUS2);
+#ifdef TESSERAE_FRAME_SELFTEST
+    if (psram_sz) frame_codec_selftest((uint8_t *)PSRAM_XIP_BASE, psram_sz);
+#endif
     if (psram_sz) {
         printf("psram: %u bytes detected; self-test %s\n",
                (unsigned)psram_sz, psram_test(psram_sz) ? "PASS" : "FAIL");
