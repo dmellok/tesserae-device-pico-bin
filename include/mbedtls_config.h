@@ -113,28 +113,32 @@
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED
 
-/* Record buffers.
+/* Record buffers, and the extension that makes a small one legal.
  *
- * 4096, NOT the 16384 a TLS peer is otherwise entitled to send. This is load
- * bearing and was found the hard way: at 16384 every handshake to the relay
- * died in mbedtls_x509_crt_parse_der with MBEDTLS_ERR_MPI_ALLOC_FAILED, even
- * though the certificate bytes in the buffer were verified byte-identical to
- * what the server sent, the same bytes parsed correctly on this same device
- * from a shallow call chain, the heap had 350 KB free with the allocator
- * wrapper never firing, and the stack peaked at 6 KB of 16 KB. Dropping to 4096
- * makes the handshake complete and the chain verify cleanly. The mechanism is
- * NOT yet understood -- see the README's "Known issues" -- so treat this value
- * as a fix whose reason is still open, and do not raise it without retesting a
- * full relay handshake on hardware.
+ * 4096 is load bearing twice over, and both were found on hardware:
  *
- * RESIDUAL RISK: 4096 is below the 16384 a peer may send unasked, and lwIP
- * keeps its ssl_config private so max_fragment_length cannot be negotiated
- * without patching the glue. Small JSON calls (pair, status, config) are far
- * inside the limit and are proven working on hardware. The ~960 KB FRAME
- * download is not yet proven: if the relay sends records larger than 4 KB it
- * will fail with a fatal alert. That is the next thing to verify. */
+ *   - At 16384 every handshake to the relay died in
+ *     mbedtls_x509_crt_parse_der with MBEDTLS_ERR_MPI_ALLOC_FAILED, while the
+ *     received certificate bytes were byte-identical to the server's, those
+ *     same bytes parsed on this device from a shallow call chain, a host build
+ *     of this config parsed and verified them, the heap had 350 KB free with an
+ *     allocator wrapper that never fired, and the stack peaked at 6 KB of 16 KB.
+ *     A fully clean rebuild reproduced it, so it is not stale objects either.
+ *     The mechanism remains UNKNOWN; see the README.
+ *   - At 4096 the handshake and the small JSON calls work, but a bulk download
+ *     dies once the server ramps its record size ("requesting more data than
+ *     fits" out of mbedtls_ssl_fetch_input) -- which Cloudflare does partway
+ *     through a large body, around 54 KB in.
+ *
+ * A TLS 1.2 peer may send 16 KB records unasked, so a 4 KB client is only
+ * correct if it SAYS so. MBEDTLS_SSL_MAX_FRAGMENT_LENGTH is that statement:
+ * RFC 6066 max_fragment_length, negotiated in the ClientHello, which obliges a
+ * server that honours it to stay inside our buffer. net_tls.c sets the value.
+ * A server that ignores the extension will still overrun us, so this is a
+ * mitigation rather than a guarantee. */
 #define MBEDTLS_SSL_IN_CONTENT_LEN   4096
 #define MBEDTLS_SSL_OUT_CONTENT_LEN  4096
+#define MBEDTLS_SSL_MAX_FRAGMENT_LENGTH
 
 
 /* Error strings cost about 8 KB of flash (of 16 MB) and turn "handshake failed:

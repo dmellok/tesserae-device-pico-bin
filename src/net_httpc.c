@@ -17,6 +17,7 @@
 #include <strings.h>
 #include <stdlib.h>
 
+#include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
 #include "lwip/altcp.h"
 #include "lwip/altcp_tcp.h"
@@ -75,10 +76,30 @@ static volatile int s_dns;     /* 0 pending, 1 ok, 2 fail */
 
 /* ---- body sink ---- */
 
+/* Progress reporting for large bodies.
+ *
+ * A frame download that does not finish is either SLOW or STALLED, and those
+ * have opposite fixes -- a longer timeout versus an actual bug. Guessing
+ * between them from a bare "timeout after 60000ms" is how you end up changing
+ * the wrong thing, so report bytes against wall time and let the number say
+ * which it is. Only for caller-supplied sinks: control JSON is far too small
+ * to be worth a line. */
+#define PROGRESS_STEP  (8u * 1024u)
+static size_t   s_progress_next;
+static uint32_t s_progress_start_ms;
+
 static void sink_write(const uint8_t *p, size_t n)
 {
     uint8_t *dst = s.sink ? s.sink : (uint8_t *)s_inline;
     size_t   cap = s.sink ? s.sink_cap : INLINE_MAX;
+
+    if (s.sink != NULL && s.body_len + n >= s_progress_next) {
+        uint32_t ms = (uint32_t)(time_us_64() / 1000ull) - s_progress_start_ms;
+        unsigned kb = (unsigned)((s.body_len + n) / 1024u);
+        printf("http: %u KB in %u ms (%u KB/s)\n", kb, (unsigned)ms,
+               ms ? (unsigned)((uint64_t)kb * 1000ull / ms) : 0u);
+        s_progress_next += PROGRESS_STEP;
+    }
     if (s.body_len + n > cap) {
         size_t fit = (s.body_len < cap) ? (cap - s.body_len) : 0;
         if (fit) { memcpy(dst + s.body_len, p, fit); s.body_len += fit; }
@@ -442,6 +463,8 @@ bool http_request(const http_req_t *req, http_resp_t *resp)
     s.cstate = CH_SIZE; s.chunk_remain = 0; s.sizelen = 0;
     s.done = false; s.err = false; s.pcb_dead = false;
     s_dns = 0;
+    s_progress_next = PROGRESS_STEP;
+    s_progress_start_ms = (uint32_t)(time_us_64() / 1000ull);
 
     uint32_t timeout_ms = req->timeout_ms ? req->timeout_ms : 10000;
 
@@ -505,7 +528,22 @@ bool http_request(const http_req_t *req, http_resp_t *resp)
     }
     cyw43_arch_lwip_end();
 
-    if (!s.done)  { printf("http: timeout after %ums\n", (unsigned)t); return false; }
+    if (!s.done) {
+        /* Say WHERE it stalled. "Timeout" alone cannot distinguish a request
+         * that was never sent from one whose response never started from one
+         * that died part-way through a body -- and those have nothing in
+         * common. Chasing the wrong one costs a flash cycle each time. */
+        printf("http: timeout after %ums (req %u/%u sent, hdr %u B%s, body %u B%s)\n",
+               (unsigned)t, (unsigned)s.req_sent, (unsigned)s.req_len,
+               (unsigned)s.hdr_len, s.hdr_done ? " complete" : " INCOMPLETE",
+               (unsigned)s.body_len,
+               s.chunked ? ", chunked" : (s.have_clen ? ", content-length" : ", no framing"));
+        if (s.hdr_done && s.have_clen)
+            printf("http:   expected %u body bytes\n", (unsigned)s.clen);
+        if (!s.hdr_done && s.hdr_len)
+            printf("http:   partial status line: %.60s\n", s.hdr);
+        return false;
+    }
     if (s.err)    { printf("http: transport error\n"); return false; }
     if (!s.hdr_done) { printf("http: no response headers\n"); return false; }
 

@@ -312,11 +312,22 @@ struct altcp_tls_config *net_tls_config(void)
         printf("tls: could not create the client config (root store or memory)\n");
         return NULL;
     }
-    /* NOTE: max_fragment_length is compiled in but cannot be CONFIGURED here --
-     * lwIP keeps struct altcp_tls_config private to altcp_tls_mbedtls.c and
-     * offers no setter, so mbedtls_ssl_conf_max_frag_len() is out of reach
-     * without patching the glue. The 4 KB record buffer is therefore a local
-     * constraint the server is not told about; see mbedtls_config.h. */
+    /* Tell the server our records are small (RFC 6066 max_fragment_length).
+     *
+     * Without this, a 4 KB input buffer is simply non-compliant: a TLS 1.2 peer
+     * may send 16 KB records unasked, and Cloudflare does exactly that partway
+     * through a large body. With it, a server that honours the extension is
+     * obliged to stay inside our buffer.
+     *
+     * lwIP declares struct altcp_tls_config only inside altcp_tls_mbedtls.c and
+     * offers no setter, but mbedtls_ssl_config is its FIRST member, so the
+     * handle doubles as a pointer to the config. That is a layout dependency on
+     * a vendored file, which is why it is spelled out here rather than hidden
+     * in a cast: if lwIP ever reorders that struct this call corrupts the
+     * config instead of failing to compile. The failure mode if the extension
+     * is simply not honoured is the one we already have. */
+    mbedtls_ssl_conf_max_frag_len((mbedtls_ssl_config *)s_conf,
+                                  MBEDTLS_SSL_MAX_FRAG_LEN_4096);
     printf("tls: client config ready (%u bytes of built-in roots)\n",
            (unsigned)sizeof k_ca_roots_pem);
     return s_conf;

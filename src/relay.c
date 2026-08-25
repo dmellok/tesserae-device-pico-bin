@@ -15,7 +15,7 @@
 #include "net_tls.h"
 
 #define RELAY_HTTP_MS   15000   /* TLS handshake + round trip, over the internet */
-#define RELAY_FRAME_MS  60000   /* a ~960 KB sealed frame */
+#define RELAY_FRAME_MS  45000   /* stalls fast; see the timeout diagnostics */
 
 /* ETag of a frame that decrypted but has not reached the glass yet. Held here
  * until relay_commit_frame(), so a frame that fails to paint is re-fetched next
