@@ -11,6 +11,20 @@
 # Needs the device's USB up (an awake cycle or the setup portal). If it is in
 # deep sleep there is no serial port: double-tap RESET, then re-run.
 #
+# Expect to re-run this. POWMAN deep sleep tears the USB PHY down, so a device
+# on a normal cadence is absent from USB for all but a few seconds of each
+# cycle, and an attempt that lands in the sleep window fails through no fault of
+# the hardware. Wrapping the call in a retry loop until it prints "flash: done"
+# is the normal way to use it:
+#
+#   for i in $(seq 1 25); do
+#       ./scripts/flash.sh 2>&1 | tail -1 | grep -q "flash: done" && break
+#       sleep 4
+#   done
+#
+# Setting ALWAYS_ON in secrets.h keeps USB up continuously and makes flashing
+# immediate, which is worth doing for a bench session.
+#
 # macOS only (uses /Volumes and diskutil). Usage:
 #   scripts/flash.sh [path/to/firmware.uf2]   # default: the PlatformIO build output
 set -u
