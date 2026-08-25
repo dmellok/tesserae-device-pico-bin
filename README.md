@@ -352,6 +352,63 @@ and never touches PSRAM or the wireless radio.
   `panels.c` would carry over (this is essentially what `tesserae-device-esp32
   -bin` already does for the 13.3").
 
+## Known issues
+
+### The relay cannot fetch a full-size frame
+
+Pairing, the status heartbeat and the config poll all work. A ~960 KB frame
+download does not. It fails the same way every time: request sent, headers
+complete, `Content-Length: 960028`, then ~54 KB arrives at ~130 KB/s in under
+half a second and the connection goes silent.
+
+mbedTLS names the cause -- *"requesting more data than fits"* out of
+`mbedtls_ssl_fetch_input`. Cloudflare ramps its TLS record size partway through
+a large body, and once a record exceeds `MBEDTLS_SSL_IN_CONTENT_LEN` the client
+cannot hold it.
+
+The obvious answer is to raise that buffer to the 16384 a TLS 1.2 peer may send.
+That does not work either: at 16384 the *handshake* dies in
+`mbedtls_x509_crt_parse_der` with `MBEDTLS_ERR_MPI_ALLOC_FAILED`. Eliminated by
+experiment, one variable at a time:
+
+| Suspect | Result |
+| --- | --- |
+| Corrupt/truncated certificate bytes | Recovered from a level-4 trace, byte-identical to the server's |
+| The mbedTLS build | Those same bytes parse on-device (any alignment, chained, verified) and on a host build of the identical config |
+| Heap | 350 KB free; an allocator wrapper around `mbedtls_calloc` never fired |
+| Stack | Painted and measured: 6332 bytes of 16384 |
+| Stale objects | A full `rm -rf .pio/build` reproduces it |
+| pbuf pool (32 -> 64), lwIP heap (32 K -> 64 K) | Stall unmoved at ~54 KB |
+| TCP window (17.5 -> 35 KB) | 16384 still fails |
+| Asymmetric buffers (`IN != OUT`) | `IN == OUT == 16384` fails identically |
+| RFC 6066 `max_fragment_length` | Sent correctly; Cloudflare ignores it |
+
+`MBEDTLS_ERR_MPI_ALLOC_FAILED` is misleading here: `mbedtls_mpi_grow()` returns
+it both when `calloc` fails *and* when the requested limb count exceeds
+`MBEDTLS_MPI_MAX_LIMBS`, so a corrupted length reads as an allocation failure.
+The mechanism remains unknown.
+
+**The fix is not to make large transfers work -- it is to stop having them.** A
+real render, packed to 4bpp Spectra 6 exactly as this panel consumes it, is
+960,000 bytes and deflates to **6,855** (0.7%). An e-ink dashboard is flat
+colour and sharp text over a six-value palette, so that ratio is the format, not
+a lucky sample. At ~7 KB a frame is one small request, far below the point where
+the record ramp starts, and the 16384 bug stops mattering.
+
+That needs no change on the relay: the Worker forwards opaque bytes and already
+echoes a plaintext `X-Tesserae-Format` from whatever the publisher stores, so
+home deflates before sealing and marks the format, and the firmware inflates
+after unsealing. Order matters -- ciphertext does not compress, so it must be
+compress-then-seal. Note that compress-then-encrypt carries a CRIME-style length
+side channel; here the plaintext is a server-rendered dashboard no attacker
+influences per request, so the leak is roughly "how busy the image is".
+
+If home cannot change, the alternative is `Range` support in the Worker's
+`getFrame` (R2 supports ranges natively) plus a sliced fetch. It works, but each
+slice needs its own connection to reset the record ramp, and a TLS handshake on
+this board measures ~8 s -- roughly 20 handshakes and three minutes per frame,
+against one request for the compressed route.
+
 ## Factory reset
 
 Hold the **A** button (leftmost, GP15) and tap RESET, then keep holding for 10
