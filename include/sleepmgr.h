@@ -68,6 +68,25 @@ uint32_t sleep_relay_authfail(void);
 void     sleep_relay_authfail_inc(void);
 void     sleep_relay_authfail_reset(void);
 
+/* Last panel variant the model EEPROM successfully reported, or 0xFF if none
+ * has been seen this power session.
+ *
+ * The EEPROM is a separate I2C chip from the SPI panel and is known to go quiet
+ * after rapid warm reboots (see CLAUDE.md); a clean power cycle revives it. That
+ * matters far more than it sounds, because the panel driver -- and therefore the
+ * ENTIRE frame path -- is selected from this variant. One unanswered read used
+ * to mean the device silently stopped asking the server for images at all, while
+ * still posting healthy heartbeats. Remembering the answer here bridges exactly
+ * the gap that fails: POWMAN scratch survives the deep sleeps and warm reboots
+ * where the EEPROM sulks, and after a true power cycle the EEPROM answers again
+ * anyway.
+ *
+ * Deliberately NOT stored in the flash config: growing config_t moves the CRC
+ * offset, which invalidates every saved blob -- including a working cloud-relay
+ * pairing. A panel identity is not worth making people re-pair for. */
+uint8_t sleep_panel_variant(void);
+void    sleep_set_panel_variant(uint8_t variant);
+
 /* Raw POWMAN timer value in milliseconds.
  *
  * Unlike sleep_epoch_now() this never returns 0 and keeps counting across deep

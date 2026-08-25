@@ -128,6 +128,23 @@ uint32_t sleep_relay_authfail(void)      { return scratch_get16(5); }
 void     sleep_relay_authfail_inc(void)  { scratch_put16(5, scratch_get16(5) + 1); }
 void     sleep_relay_authfail_reset(void){ scratch_put16(5, 0); }
 
+/* scratch[6] low-16: last known panel variant, tagged so 0 is a real value.
+ * Not cleared on a cold boot -- unlike the counters above this records a
+ * hardware fact, and the whole point is to still hold it when the EEPROM
+ * declines to answer. */
+#define PANEL_VARIANT_TAG 0x100u
+
+uint8_t sleep_panel_variant(void)
+{
+    uint32_t v = scratch_get16(6);
+    return (v & PANEL_VARIANT_TAG) ? (uint8_t)(v & 0xFFu) : 0xFF;
+}
+
+void sleep_set_panel_variant(uint8_t variant)
+{
+    scratch_put16(6, PANEL_VARIANT_TAG | variant);
+}
+
 uint64_t sleep_raw_ms(void)
 {
     return powman_timer_get_ms();

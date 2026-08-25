@@ -1002,13 +1002,39 @@ int main(void)
     inky_i2c_init();
     inky_eeprom_t ee;
     uint8_t variant = 0xFF;
-    if (inky_eeprom_read(&ee)) {
+
+    /* Retry: the EEPROM is bit-banged I2C on a bus shared with nothing else, and
+     * a single missed ACK right after a warm reboot is common enough that one
+     * attempt is not evidence of absence. Three tries cost a few milliseconds. */
+    bool got = false;
+    for (int attempt = 1; attempt <= 3 && !got; attempt++) {
+        got = inky_eeprom_read(&ee);
+        if (!got && attempt < 3) sleep_ms(50);
+    }
+
+    if (got) {
         variant = ee.display_variant;
         printf("eeprom: %ux%u variant=%u (%s)\n",
                ee.width, ee.height, ee.display_variant,
                inky_display_variant_name(ee.display_variant));
+        sleep_set_panel_variant(variant);
     } else {
-        printf("eeprom: no response at 0x50; cannot identify panel\n");
+        /* Fall back to the last variant this board reported.
+         *
+         * This is the difference between "the panel is briefly unidentifiable"
+         * and "this device stops fetching images entirely", because the frame
+         * path is gated on having a driver. The failure is silent from the
+         * outside: heartbeats keep flowing and the server sees a healthy
+         * device, while the panel simply never asks for a frame again. */
+        uint8_t remembered = sleep_panel_variant();
+        if (remembered != 0xFF) {
+            variant = remembered;
+            printf("eeprom: no response at 0x50; using last known variant %u\n",
+                   (unsigned)variant);
+        } else {
+            printf("eeprom: no response at 0x50 and no variant remembered; "
+                   "cannot identify panel (power-cycle to revive the EEPROM)\n");
+        }
     }
     const panel_t *panel = panel_for_variant(variant);
     if (panel != NULL) {

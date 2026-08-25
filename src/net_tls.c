@@ -52,8 +52,12 @@ void net_tls_paint_stack(void)
     /* Leave a margin above the current frame so this call does not paint over
      * its own locals or the return address it needs. */
     volatile uint32_t here;
-    uint32_t *sp = (uint32_t *)((uintptr_t)&here & ~3u);
-    for (uint32_t *p = (uint32_t *)&__StackBottom; p < sp - 64; p++)
+    /* Arithmetic in uintptr_t, not on the uint32_t* itself: offsetting a
+     * pointer derived from a single local lets GCC apply array-bounds
+     * reasoning to it and warn, even though walking the stack is the whole
+     * point. The 256-byte margin keeps this function's own frame intact. */
+    uintptr_t limit = ((uintptr_t)&here & ~(uintptr_t)3) - 256u;
+    for (uint32_t *p = (uint32_t *)&__StackBottom; (uintptr_t)p < limit; p++)
         *p = STACK_PAINT;
 }
 
