@@ -353,74 +353,64 @@ and never touches PSRAM or the wireless radio.
   `panels.c` would carry over (this is essentially what `tesserae-device-esp32
   -bin` already does for the 13.3").
 
-## Known issues
+## The allocator trap in lwIP's altcp_tls
 
-### The relay cannot fetch a full-size frame
+Worth knowing before touching the TLS configuration, because it cost a long
+debugging session and its symptom points nowhere near its cause.
 
-Pairing, the status heartbeat and the config poll all work. A ~960 KB frame
-download does not. It fails the same way every time: request sent, headers
-complete, `Content-Length: 960028`, then ~54 KB arrives at ~130 KB/s in under
-half a second and the connection goes silent.
+`altcp_tls_mbedtls_mem.c` contains:
 
-mbedTLS names the cause -- *"requesting more data than fits"* out of
-`mbedtls_ssl_fetch_input`. Cloudflare ramps its TLS record size partway through
-a large body, and once a record exceeds `MBEDTLS_SSL_IN_CONTENT_LEN` the client
-cannot hold it.
+```c
+#if defined(MBEDTLS_PLATFORM_MEMORY) && (!defined(MBEDTLS_PLATFORM_FREE_MACRO) \
+    || !defined(MBEDTLS_PLATFORM_CALLOC_MACRO))
+#define ALTCP_MBEDTLS_PLATFORM_ALLOC 1
+```
 
-The obvious answer is to raise that buffer to the 16384 a TLS 1.2 peer may send.
-That does not work either: at 16384 the *handshake* dies in
-`mbedtls_x509_crt_parse_der` with `MBEDTLS_ERR_MPI_ALLOC_FAILED`. Eliminated by
-experiment, one variable at a time:
+and when that is 1 it calls `mbedtls_platform_set_calloc_free()` to install what
+its own comment calls *"an example/debug implementation"*, backed by
+`mem_malloc` -- **lwIP's heap, sized by `MEM_SIZE`**. So simply defining
+`MBEDTLS_PLATFORM_MEMORY` hands every mbedTLS allocation, including the 16 KB
+TLS record buffer, to a 32 KB pool meant for network buffers, while the ~350 KB
+C heap sits untouched. It also silently replaces any allocator the application
+installed first.
 
-| Suspect | Result |
-| --- | --- |
-| Corrupt/truncated certificate bytes | Recovered from a level-4 trace, byte-identical to the server's |
-| The mbedTLS build | Those same bytes parse on-device (any alignment, chained, verified) and on a host build of the identical config |
-| Heap | 350 KB free; an allocator wrapper around `mbedtls_calloc` never fired |
-| Stack | Painted and measured: 6332 bytes of 16384 |
-| Stale objects | A full `rm -rf .pio/build` reproduces it |
-| pbuf pool (32 -> 64), lwIP heap (32 K -> 64 K) | Stall unmoved at ~54 KB |
-| TCP window (17.5 -> 35 KB) | 16384 still fails |
-| Asymmetric buffers (`IN != OUT`) | `IN == OUT == 16384` fails identically |
-| RFC 6066 `max_fragment_length` | Sent correctly; Cloudflare ignores it |
+The symptom was that every relay handshake died in
+`mbedtls_x509_crt_parse_der` with `MBEDTLS_ERR_MPI_ALLOC_FAILED`, at
+`MBEDTLS_SSL_IN_CONTENT_LEN` 16384 but not 4096. Nothing pointed at memory: the
+certificate bytes were byte-identical to the server's, the same bytes parsed
+fine on-device from a shallow call chain and on a host build, the C heap had
+350 KB free, and an instrumented allocator wrapper never fired once. The buffers
+fit in lwIP's heap at 4096 and did not at 16384, so a later **32-byte** MPI
+allocation failed -- and `MBEDTLS_ERR_MPI_ALLOC_FAILED` is also what
+`mbedtls_mpi_grow()` returns for an over-large limb count, which is what made it
+read as data corruption rather than exhaustion.
 
-`MBEDTLS_ERR_MPI_ALLOC_FAILED` is misleading here: `mbedtls_mpi_grow()` returns
-it both when `calloc` fails *and* when the requested limb count exceeds
-`MBEDTLS_MPI_MAX_LIMBS`, so a corrupted length reads as an allocation failure.
-The mechanism remains unknown.
+The fix is in [`include/mbedtls_config.h`](include/mbedtls_config.h): define
+`MBEDTLS_PLATFORM_CALLOC_MACRO`/`MBEDTLS_PLATFORM_FREE_MACRO` so
+`mbedtls_calloc` is a direct call to the C library. That flips
+`ALTCP_MBEDTLS_PLATFORM_ALLOC` to 0, lwIP keeps its hands off, and `MEM_SIZE`
+only has to cover lwIP's own traffic. **Do not remove those two macros.**
 
-**The fix is not to make large transfers work -- it is to stop having them.** A
-real render, packed to 4bpp Spectra 6 exactly as this panel consumes it, is
-960,000 bytes and deflates to **6,855** (0.7%). An e-ink dashboard is flat
-colour and sharp text over a six-value palette, so that ratio is the format, not
-a lucky sample. At ~7 KB a frame is one small request, far below the point where
-the record ramp starts, and the 16384 bug stops mattering.
+With them in place a full 960 KB sealed frame downloads over the relay in ~10 s
+at ~89 KB/s and paints normally.
 
-**The firmware half is done and waiting** ([`src/frame_codec.c`](src/frame_codec.c)).
-A frame whose decrypted length is not exactly the panel's size is checked for a
-zlib or gzip header and inflated. Measured on hardware: 6,855 bytes to 960,000
-in **435 ms** (2.2 MB/s) into PSRAM, output checksum matching the host
-byte-for-byte. It costs 2.8 KB of flash and is inert until something starts
-compressing.
+### Optional: compressed frames
 
-Detection is **by content, not by contract**: the device already knows its exact
-frame size, so the length that was always the integrity check now doubles as the
-discriminator. Nothing was invented for the server to agree to, so this cannot
-fall out of step with the other end.
+The firmware will also accept a DEFLATE-compressed frame
+([`src/frame_codec.c`](src/frame_codec.c)) -- a payload whose decrypted length
+is not exactly the panel's size is checked for a zlib or gzip header and
+inflated. This is no longer *required* for the relay to work, but it is still a
+large win: a real render is 960,000 bytes and deflates to **6,855** (0.7%),
+turning a ~10 s transfer into a sub-second one, and 435 ms of inflate (measured
+on hardware at 2.2 MB/s into PSRAM).
 
-What remains is on the **home instance**: deflate the frame before sealing it.
-Order matters -- ciphertext does not compress, so it must be compress-then-seal.
-The relay needs no change at all; it forwards opaque bytes.
-
-One caveat worth stating: compress-then-encrypt carries a CRIME-style length
-side channel. Here the plaintext is a server-rendered dashboard that no attacker
-influences per request, so the leak is roughly "how busy the image is".
-
-If home cannot change, the alternative is `Range` support in the Worker's
-`getFrame` (R2 supports ranges natively) plus a sliced fetch. It works, but each
-slice needs its own connection to reset the record ramp, and a TLS handshake on
-this board measures ~8 s -- roughly 20 handshakes and three minutes per frame,
-against one request and 435 ms for the compressed route.
+Detection is by content, not by contract: the length check that was always the
+integrity test doubles as the discriminator, so nothing needs agreeing with the
+server and the code is inert until something compresses. Enabling it is a change
+on the home instance only -- deflate before sealing, since ciphertext does not
+compress. Note that compress-then-encrypt carries a CRIME-style length side
+channel; here the plaintext is a server-rendered dashboard no attacker
+influences per request.
 
 ## Factory reset
 

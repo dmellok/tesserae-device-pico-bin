@@ -29,9 +29,12 @@ static bool s_tried;          /* one init attempt per boot, success or not */
  *
  * mbedTLS reports an out-of-memory as MBEDTLS_ERR_MPI_ALLOC_FAILED (-0x0010)
  * from wherever the bignum layer happened to be, which says nothing about how
- * much was wanted or what was already gone. Since the whole TLS path lives or
- * dies on the heap, route mbedTLS's allocator through a wrapper that reports
- * the exact failing size, and print the heap picture alongside it. */
+ * much was wanted or what was already gone -- so it is worth being able to see
+ * the heap at a glance when TLS misbehaves.
+ *
+ * Note there is deliberately no allocator wrapper here: mbedtls_calloc is a
+ * MACRO to the C library (see mbedtls_config.h), which is what keeps lwIP from
+ * substituting its own lwIP-heap-backed allocator underneath us. */
 
 extern char __end__;        /* start of the heap (end of .bss) */
 extern char __HeapLimit;    /* ceiling sbrk may grow to */
@@ -87,18 +90,6 @@ void net_tls_log_heap(const char *when)
            (unsigned)mi.arena, (unsigned)mi.uordblks, (unsigned)mi.fordblks);
 }
 
-static void *tls_calloc(size_t n, size_t sz)
-{
-    void *p = calloc(n, sz);
-    if (p == NULL) {
-        printf("tls: CALLOC FAILED for %u x %u = %u bytes\n",
-               (unsigned)n, (unsigned)sz, (unsigned)(n * sz));
-        net_tls_log_heap("calloc-fail");
-    }
-    return p;
-}
-
-static void tls_free(void *p) { free(p); }
 
 /* ---- wall clock ----------------------------------------------------------
  *
@@ -191,7 +182,6 @@ static int verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flag
  * host build of this same config parses and verifies them cleanly. */
 void net_tls_selftest(void)
 {
-    mbedtls_platform_set_calloc_free(tls_calloc, tls_free);
     net_tls_log_heap("selftest");
 
     for (int i = 0; i < 3; i++) {
@@ -284,7 +274,6 @@ struct altcp_tls_config *net_tls_config(void)
     s_tried = true;
 
     mbedtls_platform_set_time(tesserae_time);
-    mbedtls_platform_set_calloc_free(tls_calloc, tls_free);
     net_tls_log_heap("tls-init");
 #ifdef TESSERAE_TLS_DEBUG
     /* Run the offline parse here rather than from main(): stdio-USB drops

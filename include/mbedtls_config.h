@@ -31,7 +31,33 @@
 
 /* ---- platform ---- */
 #define MBEDTLS_PLATFORM_C
-#define MBEDTLS_PLATFORM_MEMORY           /* calloc/free from the SDK's heap */
+#define MBEDTLS_PLATFORM_MEMORY
+/* Route mbedTLS at the C heap EXPLICITLY, via macros rather than the settable
+ * function pointers. This is load bearing and was expensive to find.
+ *
+ * lwIP's altcp_tls_mbedtls_mem.c contains:
+ *
+ *   #if defined(MBEDTLS_PLATFORM_MEMORY) && (!defined(MBEDTLS_PLATFORM_FREE_MACRO)
+ *       || !defined(MBEDTLS_PLATFORM_CALLOC_MACRO))
+ *   #define ALTCP_MBEDTLS_PLATFORM_ALLOC 1
+ *
+ * and, when that is 1, calls mbedtls_platform_set_calloc_free() to install what
+ * its own comment calls "an example/debug implementation" backed by mem_malloc
+ * -- lwIP's heap, sized by MEM_SIZE. So merely defining MBEDTLS_PLATFORM_MEMORY
+ * hands every mbedTLS allocation, including the 16 KB record buffer, to a
+ * 32 KB pool intended for network buffers, while the 350 KB C heap sits unused.
+ *
+ * That is what broke TLS at MBEDTLS_SSL_IN_CONTENT_LEN 16384: the buffers fit
+ * at 4096 and did not at 16384, so a later 32-byte MPI allocation failed and
+ * surfaced as MBEDTLS_ERR_MPI_ALLOC_FAILED from deep inside certificate
+ * parsing. It also silently replaces any allocator the application installed
+ * first, which is why an instrumented wrapper never saw the failure.
+ *
+ * Defining both macros makes mbedtls_calloc/mbedtls_free direct calls to the C
+ * library, and flips ALTCP_MBEDTLS_PLATFORM_ALLOC to 0 so lwIP keeps its hands
+ * off. MEM_SIZE then only has to cover lwIP's own traffic. */
+#define MBEDTLS_PLATFORM_CALLOC_MACRO     calloc
+#define MBEDTLS_PLATFORM_FREE_MACRO       free
 #define MBEDTLS_NO_PLATFORM_ENTROPY
 #define MBEDTLS_ENTROPY_HARDWARE_ALT      /* pico_mbedtls.c: mbedtls_hardware_poll */
 
@@ -136,7 +162,7 @@
  * server that honours it to stay inside our buffer. net_tls.c sets the value.
  * A server that ignores the extension will still overrun us, so this is a
  * mitigation rather than a guarantee. */
-#define MBEDTLS_SSL_IN_CONTENT_LEN   4096
+#define MBEDTLS_SSL_IN_CONTENT_LEN   16384
 #define MBEDTLS_SSL_OUT_CONTENT_LEN  4096
 #define MBEDTLS_SSL_MAX_FRAGMENT_LENGTH
 
