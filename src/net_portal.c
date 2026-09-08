@@ -764,11 +764,23 @@ void portal_run(const panel_t *panel, uint8_t variant)
      * submits the form. A Rescan link sets s_rescan_pending, which we service
      * here in the main loop (never in an lwIP callback, since the scan blocks).
      *
-     * Idle timeout: if no client connects for IDLE_TIMEOUT_MS, power the AP down
-     * with no wake source so a forgotten setup AP does not drain the battery.
-     * A reset (button) brings it back into the portal. Any connection resets
-     * the timer. */
+     * Idle timeout: if no client connects for IDLE_TIMEOUT_MS, stop holding the
+     * AP up (it is the single biggest drain there is) and DEEP SLEEP, waking to
+     * try the normal cycle again. Any connection resets the timer.
+     *
+     * The sleep is timed rather than indefinite, and that matters more than it
+     * looks. This function is reached both from a fresh device with no
+     * credentials AND from the connectivity-failure fallback, and in the second
+     * case the stored credentials are usually perfectly good with the router
+     * simply down. Powering off with no wake source there means a router reboot
+     * takes the panel out permanently until somebody physically presses reset,
+     * which for a panel in someone else's kitchen is a house call.
+     *
+     * Waking instead re-runs main() from the top, which does the right thing in
+     * both cases: with credentials it retries the network and self-heals the
+     * moment the AP is back, and without them it lands straight back here. */
     const uint32_t IDLE_TIMEOUT_MS = 15u * 60u * 1000u;
+    const uint64_t IDLE_SLEEP_MS   = 15ull * 60ull * 1000ull;
     uint32_t idle_ms = 0;
     while (!s_reboot_pending) {
         if (s_rescan_pending) {
@@ -778,8 +790,9 @@ void portal_run(const panel_t *panel, uint8_t variant)
         }
         if (s_client_seen) { s_client_seen = false; idle_ms = 0; }
         else if ((idle_ms += 50) >= IDLE_TIMEOUT_MS) {
-            printf("portal: no activity for 15 min; powering down (press reset to wake)\n");
-            sleep_deep_until_reset();   /* does not return */
+            printf("portal: no activity for 15 min; sleeping %us then retrying\n",
+                   (unsigned)(IDLE_SLEEP_MS / 1000ull));
+            sleep_deep_ms(IDLE_SLEEP_MS);   /* wake reboots; does not return */
         }
         sleep_ms(50);
     }

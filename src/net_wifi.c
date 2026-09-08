@@ -12,6 +12,7 @@
 #include "config.h"
 
 static bool s_inited = false;
+static wifi_status_t s_status = WIFI_OK;
 
 /* Attempts for the ordinary scan-and-join path. The CYW43 intermittently
  * returns -8 (link fail) on the first attempt after a fresh init, especially
@@ -140,6 +141,7 @@ bool wifi_connect(const char *ssid, const char *pass, uint32_t timeout_ms,
             wifi_get_ip(ip, sizeof ip);
             printf("wifi: connected (fast), ip=%s rssi=%d\n", ip, wifi_rssi());
             if (remember_ap() && dirty != NULL) *dirty = true;
+            s_status = WIFI_OK;
             return true;
         }
         printf("wifi: fast connect failed (%d); clearing hint and scanning\n", r);
@@ -155,13 +157,22 @@ bool wifi_connect(const char *ssid, const char *pass, uint32_t timeout_ms,
             wifi_get_ip(ip, sizeof ip);
             printf("wifi: connected, ip=%s rssi=%d\n", ip, wifi_rssi());
             if (remember_ap() && dirty != NULL) *dirty = true;
+            s_status = WIFI_OK;
             return true;
         }
         printf("wifi: connect failed (%d)%s\n", r, a < SCAN_ATTEMPTS ? "; retrying" : "");
+        /* Only the scan attempts are diagnostic. A failed FAST attempt just
+         * means the cached BSSID moved, which says nothing about the network. */
+        s_status = (r == PICO_ERROR_BADAUTH) ? WIFI_ERR_BADAUTH : WIFI_ERR_NO_NETWORK;
         if (a < SCAN_ATTEMPTS) sleep_ms(1000);
     }
+    printf("wifi: giving up (%s)\n",
+           s_status == WIFI_ERR_BADAUTH ? "passphrase rejected"
+                                        : "network not found");
     return false;
 }
+
+wifi_status_t wifi_last_status(void) { return s_status; }
 
 void wifi_get_ip(char *out, size_t n)
 {

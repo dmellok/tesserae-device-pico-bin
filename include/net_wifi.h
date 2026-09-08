@@ -25,6 +25,22 @@
 bool wifi_connect(const char *ssid, const char *pass, uint32_t timeout_ms,
                   bool *dirty);
 
+/* Why the last wifi_connect() attempt ended as it did.
+ *
+ * The distinction matters because the two failures need opposite responses. A
+ * rejected passphrase is a SETTINGS problem: no amount of retrying fixes it and
+ * the setup portal is the answer. An AP that simply is not there is almost
+ * always an OUTAGE, and opening the portal for it replaces a working dashboard
+ * with a setup screen over a router reboot. They are indistinguishable from a
+ * bare "connect failed", which is why this exists. */
+typedef enum {
+    WIFI_OK = 0,
+    WIFI_ERR_BADAUTH,     /* passphrase rejected: the stored settings are wrong */
+    WIFI_ERR_NO_NETWORK,  /* AP not found, or no lease: usually transient */
+} wifi_status_t;
+
+wifi_status_t wifi_last_status(void);
+
 /* Dotted IPv4 of the station, or "0.0.0.0" if not up. out must be >= 16 bytes. */
 void wifi_get_ip(char *out, size_t n);
 

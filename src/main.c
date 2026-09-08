@@ -46,6 +46,23 @@
 #define MAX_CONNECT_FAILS  3
 #endif
 
+/* The same count, but for failures that are probably not our fault.
+ *
+ * The portal exists to correct SETTINGS, and only a rejected passphrase says
+ * the settings are actually wrong. "AP not found" is indistinguishable from
+ * "router is rebooting", and treating those alike means a brief outage
+ * replaces a working dashboard with a setup screen and stops the panel
+ * refreshing until somebody attends to it. So an absent network (or an
+ * unreachable server) gets a much longer rope before the portal is offered.
+ *
+ * Counted in wakes rather than minutes, so the wall-clock patience follows the
+ * poll interval: about three hours at the 5 minute cadence a relay panel
+ * typically runs, and proportionally less if the server asks for faster
+ * polling. */
+#ifndef MAX_TRANSIENT_FAILS
+#define MAX_TRANSIENT_FAILS  36
+#endif
+
 /* Low-battery hibernation thresholds, in VSYS millivolts (see battery.h: on
  * this board VSYS is the cell, and reads ~4.7 V whenever USB is attached).
  *
@@ -926,7 +943,14 @@ static void run_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
      * real problem is that it cannot reach the relay at all. */
     sleep_failcount_inc();
     uint32_t fails = sleep_failcount();
-    printf("net: connectivity failure %u/%u\n", (unsigned)fails, MAX_CONNECT_FAILS);
+
+    /* Only a rejected passphrase is grounds for opening the portal quickly.
+     * Everything else -- no AP, no lease, server not answering -- is far more
+     * often an outage than a misconfiguration, and gets the long threshold. */
+    bool settings_wrong = (wifi_last_status() == WIFI_ERR_BADAUTH);
+    uint32_t limit = settings_wrong ? MAX_CONNECT_FAILS : MAX_TRANSIENT_FAILS;
+    printf("net: connectivity failure %u/%u (%s)\n", (unsigned)fails, (unsigned)limit,
+           settings_wrong ? "passphrase rejected" : "network or server unreachable");
     /* We got onto WiFi but never reached the server (a wrong URL, or the server
      * is down). Distinct from a WiFi failure and distinct from waiting on the
      * admin, because the fix is different in each case. This is the FALLBACK:
@@ -934,7 +958,7 @@ static void run_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
      * one, and maybe_show_status's one-per-cycle rule is what stops this
      * painting over it. */
     maybe_show_status(panel, variant, SPLASH_SERVER_UNREACHABLE);
-    if (fails >= MAX_CONNECT_FAILS) {
+    if (fails >= limit) {
         printf("net: too many failures; re-opening setup portal\n");
         sleep_failcount_reset();
         wifi_stop();                 /* release cyw43 so the portal can re-init it */
