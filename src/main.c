@@ -38,6 +38,7 @@
 #include "relay_crypto.h"
 #include "net_tls.h"
 #include "frame_codec.h"
+#include "log_capture.h"
 
 /* Consecutive cycles that fail to reach WiFi/the server before the firmware
  * re-opens the setup portal (so a wrong WiFi password or server URL can be fixed
@@ -207,6 +208,9 @@ static void battery_goodbye_check(const panel_t *panel, uint8_t variant)
     } else {
         printf("battery: still empty (%lu mV); hibernating\n", (unsigned long)mv);
     }
+    /* Keep the log too: "the cell went flat" is precisely the answer someone
+     * wants when a panel stops updating, and this path never comes back. */
+    log_capture_persist();
     sleep_deep_ms((uint64_t)BATTERY_RECHECK_S * 1000ull);   /* does not return */
 }
 
@@ -649,6 +653,11 @@ static bool do_cycle_rest(const panel_t *panel, uint8_t variant, size_t psram_sz
                 cfg_dirty = true;
             }
             if (so.next_poll_s > 0) config_set_sleep_s(so.next_poll_s);   /* drives this sleep */
+            /* Right here and nowhere else: the radio is up, the status that
+             * asked has just been answered, and the frame fetch is already
+             * done, so this costs no extra connection and no extra awake time
+             * on a wake the server did not ask about. */
+            if (so.logs_upload) log_capture_upload();
         } else {
             printf("rest: status post failed (%d)\n", ss);
             if (ss == REST_UNAUTH || ss == REST_FORBIDDEN) {
@@ -970,6 +979,11 @@ int main(void)
 {
     stdio_init_all();
     if (DEV_BOOT_LOG_DELAY_MS) sleep_ms(DEV_BOOT_LOG_DELAY_MS);   /* dev-only; 0 in prod */
+
+    /* Tee the log before the first line, so an uploaded batch starts where the
+     * boot does. It reads flash but takes no locks and brings up no hardware,
+     * which is what lets it run this early. */
+    log_capture_init();
     printf("\ntesserae-device-pico-bin " FW_VERSION "\n");
 
     /* Before anything else touches flash or the radio: the factory-reset hold.
@@ -1167,6 +1181,10 @@ int main(void)
         uint32_t now = sleep_epoch_now();
         if (now) printf("sleep: until epoch %lu\n", (unsigned long)(now + sleep_s));
         printf("sleep: deep sleep for %ld s (wake reboots)\n", (long)sleep_s);
+        /* Last thing before the core loses power. Everything above, including
+         * the paint and this line, is now in the batch the next wake uploads;
+         * SRAM does not survive what happens on the next statement. */
+        log_capture_persist();
         sleep_deep_ms((uint64_t)sleep_s * 1000ull);   /* does not return */
     }
 
@@ -1185,6 +1203,7 @@ int main(void)
         int32_t s = config_get()->sleep_s;
         if (!config_get()->always_on && s > 0) {
             printf("sleep: always_on cleared; deep sleep for %ld s\n", (long)s);
+            log_capture_persist();
             sleep_deep_ms((uint64_t)s * 1000ull);   /* does not return */
         }
         loop_ms = (s > 0) ? (uint32_t)s * 1000u : DEV_LOOP_INTERVAL_MS;

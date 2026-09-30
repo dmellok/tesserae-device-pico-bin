@@ -42,6 +42,14 @@ static struct {
     char   req[REQ_MAX];
     size_t req_len, req_sent;
 
+    /* The body is sent straight from the caller's buffer rather than copied
+     * into req[]. A log upload is kilobytes where REQ_MAX is 1536, and the
+     * alternative (sizing req[] for the largest body any caller might have)
+     * would cost that much SRAM permanently for the benefit of one request
+     * type. Valid for the duration of http_request(), which blocks. */
+    const char *req_body;
+    size_t req_body_len, req_body_sent;
+
     /* response headers */
     char   hdr[HDR_MAX + 1];
     size_t hdr_len;
@@ -300,6 +308,17 @@ static void try_send(struct altcp_pcb *pcb)
         if (altcp_write(pcb, s.req + s.req_sent, n, TCP_WRITE_FLAG_COPY) != ERR_OK) break;
         s.req_sent += n;
     }
+    /* Headers drained, now the body. Same loop, different buffer. */
+    while (s.req_sent >= s.req_len && s.req_body != NULL &&
+           s.req_body_sent < s.req_body_len) {
+        u16_t avail = altcp_sndbuf(pcb);
+        if (avail == 0) break;
+        size_t remain = s.req_body_len - s.req_body_sent;
+        u16_t n = (remain < avail) ? (u16_t)remain : avail;
+        if (altcp_write(pcb, s.req_body + s.req_body_sent, n,
+                        TCP_WRITE_FLAG_COPY) != ERR_OK) break;
+        s.req_body_sent += n;
+    }
     altcp_output(pcb);
 }
 
@@ -339,6 +358,7 @@ static err_t connected_cb(void *arg, struct altcp_pcb *pcb, err_t err)
     /* For TLS this fires after the HANDSHAKE completes, not after the TCP
      * connect, so writing the request here is already encrypted. */
     s.req_sent = 0;
+    s.req_body_sent = 0;
     try_send(pcb);
     return ERR_OK;
 }
@@ -428,7 +448,8 @@ bool http_request(const http_req_t *req, http_resp_t *resp)
     /* Build the request. The Host header omits the port when it is the scheme
      * default: some origins compare it literally, and "example.com:443" is not
      * the string their config knows. */
-    size_t blen = req->body ? strlen(req->body) : 0;
+    size_t blen = 0;
+    if (req->body) blen = (req->body_len > 0) ? req->body_len : strlen(req->body);
     int n;
     if (port == (tls ? 443 : 80))
         n = snprintf(s.req, sizeof s.req,
@@ -447,12 +468,15 @@ bool http_request(const http_req_t *req, http_resp_t *resp)
                       (unsigned)blen);
     if (n > 0 && n < (int)sizeof s.req)
         n += snprintf(s.req + n, sizeof s.req - n, "\r\n");
-    if (n <= 0 || n >= (int)sizeof s.req - (int)blen) {
-        printf("http: request too large\n");
+    /* Only the headers have to fit; the body rides its own segment. */
+    if (n <= 0 || n >= (int)sizeof s.req) {
+        printf("http: request headers too large\n");
         return false;
     }
-    if (req->body) { memcpy(s.req + n, req->body, blen); n += (int)blen; }
-    s.req_len = (size_t)n;
+    s.req_len       = (size_t)n;
+    s.req_body      = req->body;
+    s.req_body_len  = blen;
+    s.req_body_sent = 0;
 
     /* Reset per-request state. */
     s.req_sent = 0;

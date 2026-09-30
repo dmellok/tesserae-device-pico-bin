@@ -35,6 +35,9 @@ typedef struct {
     const char *const *headers;    /* complete header lines, WITHOUT CRLF */
     int         nheaders;
     const char *body;              /* request body, NULL for none */
+    size_t      body_len;          /* 0 means strlen(body); set it for binary
+                                      or simply large bodies, which are sent
+                                      from this pointer rather than copied */
     const char *content_type;      /* NULL defaults to application/json */
     uint32_t    timeout_ms;
 

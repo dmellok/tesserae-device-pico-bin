@@ -15,6 +15,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 /* Outcome of a REST call, mapping the HTTP statuses the cycle reacts to. */
 typedef enum {
@@ -62,6 +63,11 @@ typedef struct {
      * absent, which means "keep what we have" rather than "clear it" -- an
      * older server simply never sends the key. */
     char     tz[40];
+    /* Top-level "logs": {"upload": true}. The server sets it while an operator
+     * has collection running for this device, so it is a one-shot request and
+     * not a mode: absent means do not upload, and it is never inside config
+     * (config is what gets persisted to flash, and this must not be). */
+    bool     logs_upload;
 } rest_status_out_t;
 
 /* POST /api/v1/device/discover (unauthenticated). The admin claims the device by
@@ -86,6 +92,12 @@ rest_status_t rest_get_frame(rest_frame_out_t *out, uint32_t timeout_ms);
 
 /* POST /api/v1/device/<id>/status with Bearer auth. Reports telemetry and reads
  * back next_poll_s / config / server_time. */
+/* POST /api/v1/device/<id>/log with Bearer auth, body as text/plain.
+ *
+ * Protocol v1: any 2xx means the server has the bytes and they need never be
+ * sent again. Used only when a status response asked for them. */
+rest_status_t rest_post_log(const char *batch, size_t len, uint32_t timeout_ms);
+
 rest_status_t rest_post_status(int rssi, const char *ip,
                                uint16_t panel_w, uint16_t panel_h,
                                int32_t next_sleep_s, uint32_t sleep_until,

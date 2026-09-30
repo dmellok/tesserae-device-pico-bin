@@ -14,6 +14,7 @@
 
 #include "net_httpc.h"
 #include "config.h"
+#include "log_capture.h"
 #include "sleepmgr.h"
 #include "battery.h"
 #include "cJSON.h"
@@ -239,6 +240,16 @@ rest_status_t rest_post_status(int rssi, const char *ip,
      * server last told us. Empty until it delivers one, which is the normal
      * state and not an error. */
     cJSON_AddStringToObject(o, "tz", c->tz);
+    /* Capability advertisement. The server only ever asks a device that has
+     * declared logs.schema >= 1, so this has to ride every beat, not just the
+     * first: the server treats it as sticky but a fresh install has not seen
+     * one yet. */
+    cJSON *logs = cJSON_CreateObject();
+    if (logs) {
+        cJSON_AddNumberToObject(logs, "schema", 1);
+        cJSON_AddNumberToObject(logs, "ring_bytes", log_capture_ring_bytes());
+        cJSON_AddItemToObject(o, "logs", logs);
+    }
     if (sleep_until) cJSON_AddNumberToObject(o, "sleep_until", (double)sleep_until);
     char *body = cJSON_PrintUnformatted(o);
     cJSON_Delete(o);
@@ -263,6 +274,36 @@ rest_status_t rest_post_status(int rssi, const char *ip,
         out->sleep_interval_s = json_get_int(cfg, "sleep_interval_s", -1);
         json_get_str(cfg, "tz", out->tz, sizeof out->tz);
     }
+    const cJSON *rlogs = cJSON_GetObjectItemCaseSensitive(r, "logs");
+    if (rlogs)
+        out->logs_upload = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(rlogs, "upload"));
     cJSON_Delete(r);
     return REST_OK;
+}
+
+rest_status_t rest_post_log(const char *batch, size_t len, uint32_t timeout_ms)
+{
+    if (batch == NULL || len == 0) return REST_OK;
+
+    const config_t *c = config_get();
+    char url[256];
+    snprintf(url, sizeof url, "%s/api/v1/device/%s/log", c->server_url, config_device_id());
+
+    char auth[300];
+    snprintf(auth, sizeof auth, "Authorization: Bearer %s", c->device_token);
+    const char *hdrs[] = { auth };
+
+    http_req_t req = {
+        .method       = "POST",
+        .url          = url,
+        .headers      = hdrs,
+        .nheaders     = 1,
+        .body         = batch,
+        .body_len     = len,
+        .content_type = "text/plain; charset=utf-8",
+        .timeout_ms   = timeout_ms,
+    };
+    http_resp_t resp;
+    if (!http_request(&req, &resp)) return REST_NET_ERR;
+    return map_status(resp.status);
 }
