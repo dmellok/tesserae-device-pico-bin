@@ -19,6 +19,7 @@
 
 #include "inky_eeprom.h"
 #include "panels.h"
+#include "epd_io.h"
 #include "net_wifi.h"
 #include "net_mqtt.h"
 #include "net_rest.h"
@@ -486,6 +487,7 @@ static void run_cycle(const panel_t *panel, uint8_t variant, size_t psram_sz)
 
 int main(void)
 {
+    epd_board_init();
     stdio_init_all();
     if (DEV_BOOT_LOG_DELAY_MS) sleep_ms(DEV_BOOT_LOG_DELAY_MS);   /* dev-only; 0 in prod */
     printf("\ntesserae-device-pico-bin\n");
@@ -493,12 +495,21 @@ int main(void)
     /* Phase 4a (WIP): bring up PSRAM (needed only for frames too big for SRAM,
      * e.g. the 13.3"). Returns 0 on boards without it. The self-test is a
      * temporary de-risk check and will be trimmed once the fetch path uses it. */
+#ifdef INKY_FRAME_SPECTRA_7
+    /* Frame PSRAM is on SPI0, not QMI. The 192000-byte frame fits in SRAM. */
+    size_t psram_sz = 0;
+#else
     size_t psram_sz = psram_init(PSRAM_CS_PIN_PLUS2);
+#endif
     if (psram_sz) {
         printf("psram: %u bytes detected; self-test %s\n",
                (unsigned)psram_sz, psram_test(psram_sz) ? "PASS" : "FAIL");
     } else {
+#ifdef INKY_FRAME_SPECTRA_7
+        printf("frame: using SRAM; onboard SPI PSRAM not initialised\n");
+#else
         printf("psram: none detected (large panels need a PSRAM board)\n");
+#endif
     }
 
     /* Phase 2 (WIP, building toward ESP32-client parity): load persistent
@@ -566,6 +577,12 @@ int main(void)
     } else {
         printf("no driver for variant %u\n", variant);
     }
+
+#ifdef INKY_FRAME_BOOT_STRIPES
+    if (panel) panel->paint(variant, NULL);
+    printf("epd: stripe test finished; network disabled in this build\n");
+    while (true) sleep_ms(1000);
+#endif
 
     /* Phase 5: report why we woke (cold boot vs POWMAN timer wake) and start
      * the always-on wall-clock timer (it survives deep sleep once SNTP sets it). */

@@ -270,3 +270,32 @@ a persistent web server, so deployed units are reconfigured via the setup portal
 AGPL-3.0-or-later (see [LICENSE](LICENSE)), matching the sibling
 `tesserae-device-*` repositories. Bundled third-party code (DHCP/DNS servers,
 font, QR encoder) keeps its own permissive license; see [NOTICES.md](NOTICES.md).
+
+### Inky Frame 7.3 Spectra 6 (experimental)
+
+The Pico 2 W aboard Frame uses different wiring from an Impression HAT.
+Build `inky_frame_spectra_7` for normal operation, or build the standalone
+stripe diagnostic with:
+
+```sh
+pio run -e inky_frame_spectra_7_test
+```
+
+The diagnostic paints six vertical stripes once, then stops without starting
+Wi-Fi. Flash `.pio/build/inky_frame_spectra_7_test/firmware.uf2` and monitor USB
+serial at 115200 baud. It logs the shift register and BUSY waits; a timeout
+aborts the display sequence. Stripe refresh and normal downloaded-image
+operation have been confirmed on hardware by a user.
+
+This profile selects panel variant 22 without an EEPROM, uses SPI0 on GP18/19,
+CS GP17, D/C GP28, reset GP27, and BUSY from shift-register bit 7 (clock GP8,
+latch GP9, data GP10). GP2 holds battery power on. The E673 register sequence
+is retained from the Impression Python port for this initial transport test.
+The onboard SPI PSRAM is deselected but not supported by the QMI PSRAM driver;
+the 192,000-byte packed framebuffer uses SRAM. This profile retains POWMAN
+sleep and does not implement RTC-controlled Frame power-off.
+Frame output is rotated 180 degrees while streaming, without modifying the
+downloaded framebuffer or allocating another full-frame buffer.
+
+The existing `pimoroni_pico_plus_2w` environment retains Impression wiring and
+EEPROM discovery.

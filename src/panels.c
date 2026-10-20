@@ -54,10 +54,38 @@ static void stream_single(uint8_t cs, uint32_t setup, int width, int height,
     uint8_t row[MAX_ROW_BYTES];
     int row_bytes = width / 2;
     if (!frame) fill_stripe_row(row, row_bytes, width, 0, pal, n);
+#ifdef INKY_FRAME_SPECTRA_7
+    /* Rotate the native packed-4bpp image 180 degrees. Reversing pixels
+     * requires reversing both byte order and the two nibbles in each byte.
+     * The stripe pattern has identical rows, so reverse its row just once. */
+    if (!frame) {
+        for (int b = 0; b < row_bytes / 2; ++b) {
+            uint8_t left = row[b];
+            uint8_t right = row[row_bytes - 1 - b];
+            row[b] = (uint8_t)((right << 4) | (right >> 4));
+            row[row_bytes - 1 - b] = (uint8_t)((left << 4) | (left >> 4));
+        }
+        if (row_bytes & 1) {
+            uint8_t mid = row[row_bytes / 2];
+            row[row_bytes / 2] = (uint8_t)((mid << 4) | (mid >> 4));
+        }
+    }
+#endif
     epd_dtm_begin(cs, setup, 0x10);
     for (int y = 0; y < height; y++) {
+#ifdef INKY_FRAME_SPECTRA_7
+        if (frame) {
+            const uint8_t *src = frame + (size_t)(height - 1 - y) * row_bytes;
+            for (int b = 0; b < row_bytes; ++b) {
+                uint8_t packed = src[row_bytes - 1 - b];
+                row[b] = (uint8_t)((packed << 4) | (packed >> 4));
+            }
+        }
+        epd_dtm_write(row, row_bytes);
+#else
         const uint8_t *src = frame ? (frame + (size_t)y * row_bytes) : row;
         epd_dtm_write(src, row_bytes);
+#endif
     }
     epd_dtm_end();
 }
@@ -180,15 +208,20 @@ static void paint_el133uf1(uint8_t variant, const uint8_t *frame)
 
 /* ===================== Spectra 6 small (E673 7.3", E640 4.0") ===================== */
 
-static void paint_spectra6_small(int width, int height, const uint8_t tres[4],
+static void paint_spectra6_small(uint8_t cs, int width, int height, const uint8_t tres[4],
                                  uint8_t btst2_last, uint32_t drf_timeout_ms,
                                  const uint8_t *psr_rewrite, const uint8_t *frame)
 {
     epd_io_init(1 * 1000 * 1000);
-    epd_cs_init(cs8);
+    epd_cs_init(cs);
     epd_reset(1, 30, 30, 300);
 
+#ifdef INKY_FRAME_SPECTRA_7
+    if (!epd_wait_ready(45000)) return;
+    const uint32_t S = 0;
+#else
     const uint32_t S = SETUP_SPECTRA6;
+#endif
     static const uint8_t UNLOCK[] = {0x49, 0x55, 0x20, 0x08, 0x09, 0x18};
     static const uint8_t PWR[]    = {0x3F};
     static const uint8_t PSR[]    = {0x5F, 0x69};
@@ -202,31 +235,45 @@ static void paint_spectra6_small(int width, int height, const uint8_t tres[4],
     static const uint8_t PWS[]    = {0x2F};
     static const uint8_t VDCS[]   = {0x01};
 
-    epd_command(&cs8, 1, S, 0xAA, UNLOCK, sizeof UNLOCK);
-    epd_command(&cs8, 1, S, 0x01, PWR,   sizeof PWR);
-    epd_command(&cs8, 1, S, 0x00, PSR,   sizeof PSR);
-    epd_command(&cs8, 1, S, 0x05, BTST1, sizeof BTST1);
-    epd_command(&cs8, 1, S, 0x08, BTST3, sizeof BTST3);
-    epd_command(&cs8, 1, S, 0x06, BTST2, sizeof BTST2);
-    epd_command(&cs8, 1, S, 0x03, POFS,  sizeof POFS);
-    epd_command(&cs8, 1, S, 0x60, TCON,  sizeof TCON);
-    epd_command(&cs8, 1, S, 0x30, PLL,   sizeof PLL);
-    epd_command(&cs8, 1, S, 0x50, CDI,   sizeof CDI);
-    epd_command(&cs8, 1, S, 0x61, tres,  4);
-    epd_command(&cs8, 1, S, 0xE3, PWS,   sizeof PWS);
-    epd_command(&cs8, 1, S, 0x82, VDCS,  sizeof VDCS);
+    epd_command(&cs, 1, S, 0xAA, UNLOCK, sizeof UNLOCK);
+    epd_command(&cs, 1, S, 0x01, PWR,   sizeof PWR);
+    epd_command(&cs, 1, S, 0x00, PSR,   sizeof PSR);
+    epd_command(&cs, 1, S, 0x05, BTST1, sizeof BTST1);
+    epd_command(&cs, 1, S, 0x08, BTST3, sizeof BTST3);
+    epd_command(&cs, 1, S, 0x06, BTST2, sizeof BTST2);
+    epd_command(&cs, 1, S, 0x03, POFS,  sizeof POFS);
+    epd_command(&cs, 1, S, 0x60, TCON,  sizeof TCON);
+    epd_command(&cs, 1, S, 0x30, PLL,   sizeof PLL);
+    epd_command(&cs, 1, S, 0x50, CDI,   sizeof CDI);
+    epd_command(&cs, 1, S, 0x61, tres,  4);
+    epd_command(&cs, 1, S, 0xE3, PWS,   sizeof PWS);
+    epd_command(&cs, 1, S, 0x82, VDCS,  sizeof VDCS);
     printf("epd: init complete\n");
 
-    stream_single(cs8, S, width, height, frame, PAL_SPECTRA6, 6);
+    stream_single(cs, S, width, height, frame, PAL_SPECTRA6, 6);
     printf("epd: frame streamed, refreshing...\n");
 
     const uint8_t btst2b[4] = {0x6F, 0x1F, 0x17, btst2_last};
     static const uint8_t z = 0x00;
-    epd_command(&cs8, 1, S, 0x04, NULL, 0);    sleep_ms(300);
-    epd_command(&cs8, 1, S, 0x06, btst2b, 4);
-    epd_command(&cs8, 1, S, 0x12, &z, 1);      epd_wait_ready(drf_timeout_ms);
-    epd_command(&cs8, 1, S, 0x02, &z, 1);      sleep_ms(300);
-    if (psr_rewrite) { epd_command(&cs8, 1, S, 0x00, psr_rewrite, 2); sleep_ms(300); }
+#ifdef INKY_FRAME_SPECTRA_7
+    epd_command(&cs, 1, S, 0x04, NULL, 0);
+    if (!epd_wait_ready(45000)) return;
+    epd_command(&cs, 1, S, 0x06, btst2b, 4);
+    epd_command(&cs, 1, S, 0x12, &z, 1);
+    if (!epd_wait_ready(45000)) return;
+    epd_command(&cs, 1, S, 0x02, &z, 1);
+    if (!epd_wait_ready(45000)) return;
+    if (psr_rewrite) {
+        epd_command(&cs, 1, S, 0x00, psr_rewrite, 2);
+        if (!epd_wait_ready(45000)) return;
+    }
+#else
+    epd_command(&cs, 1, S, 0x04, NULL, 0);    sleep_ms(300);
+    epd_command(&cs, 1, S, 0x06, btst2b, 4);
+    epd_command(&cs, 1, S, 0x12, &z, 1);      epd_wait_ready(drf_timeout_ms);
+    epd_command(&cs, 1, S, 0x02, &z, 1);      sleep_ms(300);
+    if (psr_rewrite) { epd_command(&cs, 1, S, 0x00, psr_rewrite, 2); sleep_ms(300); }
+#endif
     printf("epd: refresh done\n");
 }
 
@@ -235,14 +282,14 @@ static void paint_e673(uint8_t variant, const uint8_t *frame)
     (void)variant;
     static const uint8_t tres[4] = {0x03, 0x20, 0x01, 0xE0};
     static const uint8_t psr_rewrite[2] = {0x4F, 0x6E};
-    paint_spectra6_small(800, 480, tres, 0x49, 40000, psr_rewrite, frame);
+    paint_spectra6_small(EPD_SMALL_CS, 800, 480, tres, 0x49, 40000, psr_rewrite, frame);
 }
 
 static void paint_e640(uint8_t variant, const uint8_t *frame)
 {
     (void)variant;
     static const uint8_t tres[4] = {0x01, 0x90, 0x02, 0x58};
-    paint_spectra6_small(600, 400, tres, 0x47, 50000, NULL, frame);
+    paint_spectra6_small(cs8, 600, 400, tres, 0x47, 50000, NULL, frame);
 }
 
 /* ===================== AC073TC1A, 7.3" 7-colour (untested) ===================== */
@@ -372,6 +419,9 @@ static const panel_t *const k_panels[] = {
 
 const panel_t *panel_for_variant(uint8_t variant)
 {
+#ifdef INKY_FRAME_SPECTRA_7
+    if (variant != 22) return NULL;
+#endif
     for (size_t i = 0; i < sizeof(k_panels) / sizeof(k_panels[0]); i++) {
         const panel_t *p = k_panels[i];
         for (uint8_t j = 0; j < p->n_variants; j++) {

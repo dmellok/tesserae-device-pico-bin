@@ -21,8 +21,13 @@
 
 /* Inky model EEPROM I2C pins, on the Pi's SDA1/SCL1 (BCM2/BCM3) which the 1:1
  * adapter maps to Pico GP2/GP3. Bit-banged, so any two GPIOs work. */
+#ifdef INKY_FRAME_SPECTRA_7
+#define EPD_PIN_SDA  4
+#define EPD_PIN_SCL  5
+#else
 #define EPD_PIN_SDA  2
 #define EPD_PIN_SCL  3
+#endif
 
 #define EEP_ADDR     0x50
 /* Half bit period. Deliberately slow (~10 kHz) so even the weak internal
@@ -84,6 +89,7 @@ static bool i2c_write_byte(uint8_t b)
 }
 
 /* Clock in 8 bits MSB-first, then send ACK (more to follow) or NACK (last). */
+#ifndef INKY_FRAME_SPECTRA_7
 static uint8_t i2c_read_byte(bool ack)
 {
     uint8_t b = 0;
@@ -99,20 +105,38 @@ static uint8_t i2c_read_byte(bool ack)
     return b;
 }
 
+#endif
+
+#ifdef INKY_FRAME_SPECTRA_7
+bool inky_eeprom_read(inky_eeprom_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    out->width           = 800;
+    out->height          = 480;
+    out->color           = 6;   /* spectra6 colour-type ID */
+    out->pcb_variant     = 0;   /* unknown; unused here */
+    out->display_variant = 22;  /* E673 7.3" Spectra 6 */
+
+    return true;
+}
+
+#else
 bool inky_eeprom_read(inky_eeprom_t *out)
 {
     uint8_t d[29];
 
     /* Dummy write: set the EEPROM's word-address pointer to 0x0000. */
     i2c_start();
-    if (!i2c_write_byte(EEP_ADDR << 1)) { i2c_stop(); return false; }  /* no device */
+    if (!i2c_write_byte(EEP_ADDR << 1)) { i2c_stop(); return false; } /* no device */
     i2c_write_byte(0x00);
     i2c_write_byte(0x00);
-    i2c_stop();
 
+    i2c_stop();
     /* Read 29 bytes from the current pointer. */
     i2c_start();
     if (!i2c_write_byte((EEP_ADDR << 1) | 1)) { i2c_stop(); return false; }
+
     for (int i = 0; i < 29; i++) {
         d[i] = i2c_read_byte(i < 28);   /* ACK all but the final byte */
     }
@@ -130,6 +154,8 @@ bool inky_eeprom_read(inky_eeprom_t *out)
     out->write_time[slen] = '\0';
     return true;
 }
+
+#endif
 
 void inky_i2c_scan(void)
 {
