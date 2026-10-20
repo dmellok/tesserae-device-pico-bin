@@ -91,7 +91,9 @@ void epd_reset(int pulses, uint32_t low_ms, uint32_t high_ms, uint32_t settle_ms
 bool epd_wait_ready(uint32_t timeout_ms)
 {
 #ifdef INKY_FRAME_SPECTRA_7
+#ifdef EPD_DEBUG_SHIFT_REGISTER
     printf("epd: shift register=0x%02X before wait\n", frame_shift_read());
+#endif
     absolute_time_t start = get_absolute_time();
     absolute_time_t deadline = make_timeout_time_ms(timeout_ms);
     sleep_ms(10);  /* Allow the controller to assert BUSY after a command. */

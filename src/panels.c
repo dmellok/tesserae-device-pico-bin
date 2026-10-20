@@ -54,38 +54,10 @@ static void stream_single(uint8_t cs, uint32_t setup, int width, int height,
     uint8_t row[MAX_ROW_BYTES];
     int row_bytes = width / 2;
     if (!frame) fill_stripe_row(row, row_bytes, width, 0, pal, n);
-#ifdef INKY_FRAME_SPECTRA_7
-    /* Rotate the native packed-4bpp image 180 degrees. Reversing pixels
-     * requires reversing both byte order and the two nibbles in each byte.
-     * The stripe pattern has identical rows, so reverse its row just once. */
-    if (!frame) {
-        for (int b = 0; b < row_bytes / 2; ++b) {
-            uint8_t left = row[b];
-            uint8_t right = row[row_bytes - 1 - b];
-            row[b] = (uint8_t)((right << 4) | (right >> 4));
-            row[row_bytes - 1 - b] = (uint8_t)((left << 4) | (left >> 4));
-        }
-        if (row_bytes & 1) {
-            uint8_t mid = row[row_bytes / 2];
-            row[row_bytes / 2] = (uint8_t)((mid << 4) | (mid >> 4));
-        }
-    }
-#endif
     epd_dtm_begin(cs, setup, 0x10);
     for (int y = 0; y < height; y++) {
-#ifdef INKY_FRAME_SPECTRA_7
-        if (frame) {
-            const uint8_t *src = frame + (size_t)(height - 1 - y) * row_bytes;
-            for (int b = 0; b < row_bytes; ++b) {
-                uint8_t packed = src[row_bytes - 1 - b];
-                row[b] = (uint8_t)((packed << 4) | (packed >> 4));
-            }
-        }
-        epd_dtm_write(row, row_bytes);
-#else
         const uint8_t *src = frame ? (frame + (size_t)y * row_bytes) : row;
         epd_dtm_write(src, row_bytes);
-#endif
     }
     epd_dtm_end();
 }
@@ -224,7 +196,15 @@ static void paint_spectra6_small(uint8_t cs, int width, int height, const uint8_
 #endif
     static const uint8_t UNLOCK[] = {0x49, 0x55, 0x20, 0x08, 0x09, 0x18};
     static const uint8_t PWR[]    = {0x3F};
+#ifdef INKY_FRAME_SPECTRA_7
+    /* Frame output needs a 180-degree turn relative to the Impression.
+     * Clearing PSR's UD and SHL scan bits (0x5F -> 0x53) flips both axes in
+     * the controller, matching the ROTATE_0 setup in Pimoroni's inky73
+     * driver (pimoroni-pico drivers/inky73/inky73.cpp). */
+    static const uint8_t PSR[]    = {0x53, 0x69};
+#else
     static const uint8_t PSR[]    = {0x5F, 0x69};
+#endif
     static const uint8_t BTST1[]  = {0x40, 0x1F, 0x1F, 0x2C};
     static const uint8_t BTST3[]  = {0x6F, 0x1F, 0x1F, 0x22};
     static const uint8_t BTST2[]  = {0x6F, 0x1F, 0x17, 0x17};
@@ -289,7 +269,7 @@ static void paint_e640(uint8_t variant, const uint8_t *frame)
 {
     (void)variant;
     static const uint8_t tres[4] = {0x01, 0x90, 0x02, 0x58};
-    paint_spectra6_small(cs8, 600, 400, tres, 0x47, 50000, NULL, frame);
+    paint_spectra6_small(EPD_SMALL_CS, 600, 400, tres, 0x47, 50000, NULL, frame);
 }
 
 /* ===================== AC073TC1A, 7.3" 7-colour (untested) ===================== */

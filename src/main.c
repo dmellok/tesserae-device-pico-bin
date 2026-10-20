@@ -32,7 +32,7 @@
 #include "sleepmgr.h"
 #include "battery.h"
 
-#define FW_VERSION  "0.2.0"
+#define FW_VERSION  "0.3.0"
 
 /* Consecutive cycles that fail to reach WiFi/the server before the firmware
  * re-opens the setup portal (so a wrong WiFi password or server URL can be fixed
